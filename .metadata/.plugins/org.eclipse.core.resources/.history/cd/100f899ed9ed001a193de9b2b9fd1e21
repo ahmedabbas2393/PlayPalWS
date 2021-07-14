@@ -1,0 +1,238 @@
+package com.playpal.udc.rewardpoints;
+
+import com.playpal.Constants.RewardPoints.RewardEvent.Fixed;
+import com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay;
+import com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerDay;
+import com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerWeek;
+import com.playpal.exceptions.PlaypalException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import com.playpal.udc.rewardpoints.model.repository.RewardPointsRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Implement award points calculation system.
+ *
+ * @author Naaman Musawwir
+ */
+@Component
+public class PointsCalculator {
+
+	private Logger logger = LoggerFactory.getLogger(RewardPointsService.class);
+
+	@Autowired
+	RewardPointsRepository frpr;
+
+	public int calculateFixedPoints(Fixed event) throws PlaypalException {
+		int points = 0;
+		try {
+			points = frpr.findByEventCode(event.name()).getPoints();
+			logger.info("Points for " + event.name() + " = " + points);
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		return points;
+	}
+
+	public int calculateFixedPerDayPoints(FixedPerDay event) throws PlaypalException {
+		int points = 0;
+		try {
+			points = frpr.findByEventCode(event.name()).getPoints();
+			logger.info("Points for " + event.name() + " = " + points);
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		return points;
+	}
+
+	public int calculateVariablePerDayPoints(VariablePerDay event, int stepsTaken, int caloriesBurnt,
+			int waterGlassesTaken, int workoutTime, double weightInLBs, double previousWeightInLBs,
+			double prePreviousWeightInLBs, double idealWeightInLBs, int cyclingTime, int pushUpsTime,
+			int flightsClimbedTime, int swimmingDistanceTime, int diastolicbloodpressure, int systolicbloodpressure,
+			int heartrate, int bodyTemprature, int WalkingPlusRunningDistance) throws PlaypalException {
+		int points = 0;
+		try {
+			switch (event) {
+
+			case ReportWater:
+				points = 5 * waterGlassesTaken;
+				break;
+			case Cycling:
+				if (cyclingTime > 0) {
+					points = 1000;
+				}
+
+				break;
+			case PushUps:
+				if (pushUpsTime > 0) {
+					points = 500;
+				}
+
+				break;
+			case FlightsClimbed:
+				if (flightsClimbedTime > 0) {
+					points = 1000;
+
+				}
+				break;
+			case Steps0:
+				if (stepsTaken < 2500) {
+					points = 1000;
+
+				}
+				break;
+			case Steps1:
+				if (stepsTaken > 2500 && stepsTaken <= 6000) {
+					points = 2000;
+
+				}
+				break;
+			case Steps2:
+				if (stepsTaken > 6000 && stepsTaken <= 10000) {
+					points = 3000;
+
+				}
+				break;
+			case Steps3:
+				if (stepsTaken > 10000) {
+					points = 4000;
+
+				}
+				break;
+			case SwimmingDistance:
+
+				if (swimmingDistanceTime > 0) {
+					points = 1000;
+				}
+
+				break;
+			case Systolicbloodpressure:
+
+				if(systolicbloodpressure > 0)
+				{
+					points = 500;
+				}
+				
+
+				break;
+			case Diastolicbloodpressure:
+
+				if(diastolicbloodpressure > 0) {
+					points = 500;
+				}
+				
+
+				break;
+			case Heartrate:
+
+				if(heartrate > 0) {
+					points = 500;
+				}
+				
+
+				break;
+
+			case Bodytemperature:
+				if(bodyTemprature > 0) {
+					points = 500;
+				}
+
+				
+
+				break;
+
+			case WalkingPlusRunningDistance:
+
+				if(WalkingPlusRunningDistance > 0) {
+					points = 1000;
+				}
+				
+
+				break;
+			case ReportBreakfast:
+				points = 400;
+				break;
+			case ReportLunch:
+				points = 400;
+				break;
+			case ReportSnacks:
+				points = 200;
+				break;
+
+			/*
+			 * case CalorieLimitNotExceeded: points = 100; break; case
+			 * NoNutrientLimitExceeded: points = 100; break; case UpdateWeight: weightInLBs
+			 * = Math.round(weightInLBs); previousWeightInLBs =
+			 * Math.round(previousWeightInLBs); prePreviousWeightInLBs =
+			 * Math.round(prePreviousWeightInLBs); idealWeightInLBs =
+			 * Math.round(idealWeightInLBs); if (weightInLBs == previousWeightInLBs &&
+			 * weightInLBs == idealWeightInLBs) { points = 20; break; } else if (weightInLBs
+			 * != previousWeightInLBs && weightInLBs == idealWeightInLBs) { points = 1000;
+			 * break; } else { double wc = Math.abs(weightInLBs - previousWeightInLBs);
+			 * double pwc = Math.abs(prePreviousWeightInLBs - previousWeightInLBs); if (wc
+			 * == pwc) { points = 10; break; } else if (wc > pwc) { if
+			 * (Math.abs(idealWeightInLBs - wc) < Math.abs(idealWeightInLBs - pwc)) { points
+			 * = (int) (100 * Math.abs(wc - pwc)); break; } } } break; case CBAndSTInADay:
+			 * if (stepsTaken >= 1000 && caloriesBurnt >= 900) { points = 100; } break; case
+			 * CBMileStoneHit: if (caloriesBurnt >= 1800 && caloriesBurnt <= 3500 &&
+			 * caloriesBurnt % 50 == 0) { points = 70; } break; case CBLinearPoints: if
+			 * (caloriesBurnt >= 1800 && caloriesBurnt <= 3500) { points = (int)
+			 * Math.round(1.4 * (caloriesBurnt - 1800)); } break; case STMileStoneHit: if
+			 * (stepsTaken >= 5000 && stepsTaken <= 12000 && stepsTaken % 200 == 0) { points
+			 * = 15; } break; case STLinearPoints: if (stepsTaken >= 5000 && stepsTaken <=
+			 * 12000) { points = (int) Math.round(0.075 * (stepsTaken - 5000)); } break;
+			 * case WTMileStoneHit: if (workoutTime >= 0 && workoutTime <= 90 && workoutTime
+			 * % 5 == 0) { points = 30; } break; case WTLinearPoints: if (workoutTime >= 0
+			 * && workoutTime <= 90) { points = 6 * workoutTime; } break;
+			 */
+
+			}
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		logger.info("Points for " + event.name() + " = " + points);
+		return points;
+	}
+
+	public int calculateWeeklyProgressPoints(VariablePerWeek event, int weekPoints, int previousWeekPoints)
+			throws PlaypalException {
+		int points = 0;
+
+		if (weekPoints < (previousWeekPoints - 10)) {
+			return 0;
+		}
+
+		int progress = previousWeekPoints - weekPoints - 5;
+		double perCentProgress = progress / previousWeekPoints * 100;
+
+		switch (event) {
+		case WeekProgress0:
+			if (perCentProgress <= 0) {
+				return 5000;
+			}
+			break;
+		case WeekProgress5:
+			if (perCentProgress > 0 && perCentProgress <= 5) {
+				return 6000;
+			}
+			break;
+		case WeekProgress15:
+			if (perCentProgress > 5 && perCentProgress <= 15) {
+				return 7500;
+			}
+			break;
+		case WeekProgress30:
+			if (perCentProgress > 15 && perCentProgress <= 30) {
+				return 10000;
+			}
+			break;
+		}
+
+		logger.info("Points for " + event.name() + " = " + points);
+		return points;
+	}
+}

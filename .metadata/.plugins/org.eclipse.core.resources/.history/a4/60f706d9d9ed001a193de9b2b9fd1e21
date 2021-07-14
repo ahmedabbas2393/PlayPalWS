@@ -1,0 +1,812 @@
+package com.playpal.udc.rewardpoints;
+
+import com.playpal.Constants.RewardPoints.ActivityType;
+import static com.playpal.Constants.RewardPoints.ActivityType.Other;
+import com.playpal.Constants.RewardPoints.RewardEvent.Fixed;
+import com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay.CompleteDayReport;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay.ReportBreakfast;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay.ReportDinner;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay.ReportLunch;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay.ReportSnack;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay.ReportWaterFixed;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.FixedPerDay.UpdateWeightFixed;
+import com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerDay;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerDay.CalorieLimitNotExceeded;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerDay.NoNutrientLimitExceeded;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerDay.ReportWater;
+import static com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerDay.UpdateWeight;
+import com.playpal.Constants.RewardPoints.RewardEvent.Recuring.VariablePerWeek;
+import com.playpal.dto.FoodCompositionIntake;
+import com.playpal.dto.LastThreeWeightsDTO;
+import com.playpal.dto.Nutrition;
+import com.playpal.enums.MealType;
+import com.playpal.exceptions.PlaypalException;
+import com.playpal.udc.ServicesClient;
+import com.playpal.udc.UserSourceDayId;
+import com.playpal.udc.activity.ActivityAPI;
+import com.playpal.udc.activity.model.ActivitiesSummary;
+import com.playpal.udc.exception.UDCException;
+import com.playpal.udc.foodintake.FoodIntakeAPI;
+import com.playpal.udc.foodintake.model.FoodIntake;
+import com.playpal.udc.healthtrack.HealthGoalComputation;
+import com.playpal.udc.healthtrack.HealthTrackApi;
+import com.playpal.udc.rewardpoints.model.RewardPointsEvent;
+import com.playpal.udc.rewardpoints.model.UserRewardPoints;
+import java.util.Date;
+import java.util.List;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import com.playpal.udc.rewardpoints.model.repository.RewardPointsEventRepository;
+import com.playpal.udc.rewardpoints.model.repository.UserRewardPointsRepository;
+import com.playpal.udc.rewardpoints.model.repository.RewardPointsRepository;
+import com.playpal.util.CommonUtils;
+import static com.playpal.util.DateUtils.getDayEnd;
+import static com.playpal.util.DateUtils.getDayStart;
+import static com.playpal.util.DateUtils.getTodayEnd;
+import static com.playpal.util.DateUtils.getTodayStart;
+import static com.playpal.util.DateUtils.getWeekEnd;
+import static com.playpal.util.DateUtils.getWeekStart;
+import java.util.ArrayList;
+import javax.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Service to provide reward points related operations.
+ *
+ * @author Naaman Musawwir
+ */
+@Service("rewardPointsService")
+@SuppressWarnings("UseSpecificCatch")
+public class RewardPointsService {
+
+	Logger logger = LoggerFactory.getLogger(RewardPointsService.class);
+
+	@Autowired
+	private PointsCalculator rewardPointsCalc;
+
+	@Autowired
+	private UserRewardPointsRepository userRewardPointsRepo;
+
+	@Autowired
+	private RewardPointsEventRepository rewardPointsEventRepo;
+
+	@Autowired
+	private RewardPointsRepository rewardPointsRepo;
+
+	@Autowired
+	private FoodIntakeAPI foodIntakeSvc;
+
+	@Autowired
+	private HealthTrackApi healthTrackSvc;
+
+	@Autowired
+	private ActivityAPI activitySvc;
+
+	@Autowired
+	ServicesClient sc;
+
+	@Autowired
+	private PointsCalcDaemon pcd;
+
+	private HealthGoalComputation goal;
+
+	public void setGoal(HealthGoalComputation goal) {
+		this.goal = goal;
+	}
+
+	/**
+	 * Get aggregate user reward points.
+	 *
+	 * @param userId user id
+	 * @param date   date
+	 * @return points
+	 * @throws PlaypalException
+	 */
+	public UserRewardPoints getAggregateUserRewardPoints(Long userId, Date date) throws PlaypalException {
+		UserRewardPoints rewardPoints = null;
+
+		try {
+			date = getDayEnd(date);
+			rewardPoints = userRewardPointsRepo.findFirst1ByUserIdAndCreatedDateBeforeOrderByIdDesc(userId, date);
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		if (rewardPoints == null) {
+			throw new PlaypalException("No reward points found!");
+		}
+
+		return rewardPoints;
+	}
+
+	/**
+	 * Get aggregate user reward points.
+	 *
+	 * @param userId    user id
+	 * @param date      date
+	 * @param weeksBack go back this number of weeks in history
+	 * @return points
+	 * @throws PlaypalException
+	 */
+	public int getUserWeeklyPoints(Long userId, Date date, int weeksBack) throws PlaypalException {
+		int rewardPoints = 0;
+
+		try {
+			if (weeksBack > 0) {
+				date.setTime(date.getTime() - 1000 * 60 * 60 * 24 * 7 * weeksBack);
+			}
+
+			Date ws = getWeekStart(date);
+			Date we = getWeekEnd(date);
+
+			List<RewardPointsEvent> res = getNotFixedRewardEvents(userId, ws, we);
+
+			if (res == null || res.isEmpty()) {
+				return rewardPoints;
+			}
+
+			for (RewardPointsEvent re : res) {
+				rewardPoints += re.getPoints();
+			}
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		return rewardPoints;
+	}
+
+	/**
+	 * Get user reward points for a day. Can return by points type if passed.
+	 *
+	 * @param userId       user id
+	 * @param activityType points activity type
+	 * @param date         date
+	 * @return points
+	 * @throws PlaypalException
+	 */
+	public int getDailyUserRewardPoints(Long userId, String activityType, Date date) throws PlaypalException {
+		int rewardPoints = 0;
+
+		try {
+			Date ts = getDayStart(date);
+			Date te = getDayEnd(date);
+
+			List<RewardPointsEvent> res;
+			if (activityType == null || activityType.isEmpty()) {
+				res = getRewardEvents(userId, ts, te);
+			} else {
+				res = getRewardEvents(userId, activityType, ts, te);
+			}
+
+			if (res == null || res.isEmpty()) {
+				return rewardPoints;
+			}
+
+			for (RewardPointsEvent re : res) {
+				rewardPoints += re.getPoints();
+			}
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		return rewardPoints;
+	}
+
+	public int getDailyUserRewardPointsByEventType(Long userId, String eventType, Date date) throws PlaypalException {
+		int rewardPoints = 0;
+
+		try {
+			Date ts = getDayStart(date);
+			Date te = getDayEnd(date);
+
+			List<RewardPointsEvent> res;
+			if (eventType == null || eventType.isEmpty()) {
+				res = getRewardEvents(userId, ts, te);
+			} else {
+				res = getRewardEventsByEventType(userId, eventType, ts, te);
+			}
+
+			if (res == null || res.isEmpty()) {
+				return rewardPoints;
+			}
+
+			for (RewardPointsEvent re : res) {
+				rewardPoints += re.getPoints();
+			}
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		return rewardPoints;
+	}
+
+	public List<RewardPointsEvent> getRewardEvents(Long userId, String pointsType, Date startDate, Date endDate)
+			throws PlaypalException {
+		startDate = getDayStart(startDate);
+		endDate = getDayEnd(endDate);
+		return rewardPointsEventRepo.findAllByUserIdAndPointsTypeAndCreatedDateBetween(userId, pointsType, startDate,
+				endDate);
+	}
+
+	public List<RewardPointsEvent> getRewardEventsByEventType(Long userId, String eventType, Date startDate,
+			Date endDate) throws PlaypalException {
+		startDate = getDayStart(startDate);
+		endDate = getDayEnd(endDate);
+		return rewardPointsEventRepo.findAllByUserIdAndEventTypeAndCreatedDateBetween(userId, eventType, startDate,
+				endDate);
+	}
+
+	public List<RewardPointsEvent> getNotFixedRewardEvents(Long userId, Date startDate, Date endDate)
+			throws PlaypalException {
+		List<String> ptni = new ArrayList<>();
+		ptni.add(Fixed.ActivityLevel.getActivityType().name());
+		startDate = getDayStart(startDate);
+		endDate = getDayEnd(endDate);
+		return rewardPointsEventRepo.findAllByUserIdAndPointsTypeNotInAndCreatedDateBetween(userId, ptni, startDate,
+				endDate);
+	}
+
+	public List<RewardPointsEvent> getRewardEvents(Long userId, Date startDate, Date endDate) throws PlaypalException {
+		startDate = getDayStart(startDate);
+		endDate = getDayEnd(endDate);
+		return rewardPointsEventRepo.findAllByUserIdAndCreatedDateBetween(userId, startDate, endDate);
+	}
+
+	public List<RewardPointsEvent> getAllRewardEvents(Long userId) throws PlaypalException {
+		return rewardPointsEventRepo.findAllByUserId(userId);
+	}
+
+	public List<String> getRewardEventCodes() throws PlaypalException {
+		return rewardPointsRepo.findEventCodes();
+	}
+
+	public Integer awardFixedRewardPoints(Long userId, Fixed rewardEvent) throws PlaypalException {
+		int pointsAwarded = 0;
+		System.out.println("awardFixedRewardPoints : CASE : 1");
+		if (alreadyAwarded(userId, rewardEvent.name(), false)) {
+			logger.warn("Points for the event '" + rewardEvent.name() + "' have already been awarded, doing nothing.");
+			System.out.println("awardFixedRewardPoints : CASE : 2");
+			return 0;
+		}
+
+		try {
+			pointsAwarded = rewardPointsCalc.calculateFixedPoints(rewardEvent);
+			System.out.println("awardFixedRewardPoints : CASE : 3");
+			Date now = new Date(System.currentTimeMillis());
+			System.out.println("awardFixedRewardPoints : CASE : 4");
+			RewardPointsEvent rpe = new RewardPointsEvent(userId, rewardEvent.name(),
+					rewardEvent.getActivityType().name(), pointsAwarded, now, "");
+			System.out.println("awardFixedRewardPoints : CASE : 5");
+			rewardPointsEventRepo.save(rpe);
+			System.out.println("awardFixedRewardPoints : CASE : 6");
+			int aggregatePoints = pointsAwarded;
+			System.out.println("awardFixedRewardPoints : CASE : 7");
+			UserRewardPoints urp = userRewardPointsRepo.findFirst1ByUserIdAndCreatedDateBeforeOrderByIdDesc(userId,
+					now);
+			System.out.println("awardFixedRewardPoints : CASE : 8");
+			if (urp != null) {
+				System.out.println("awardFixedRewardPoints : CASE : 9");
+				aggregatePoints += urp.getPoints();
+				System.out.println("awardFixedRewardPoints : CASE : 10");
+			}
+			System.out.println("awardFixedRewardPoints : CASE : 11");
+			urp = new UserRewardPoints(userId, aggregatePoints, now);
+			System.out.println("awardFixedRewardPoints : CASE : 12");
+			userRewardPointsRepo.save(urp);
+			System.out.println("awardFixedRewardPoints : CASE : 13");
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+
+		return pointsAwarded;
+	}
+
+	/**
+	 * Method must be called when wek has ended. It goes to previous week of the
+	 * call date.
+	 *
+	 * @param userId - User Id
+	 * @return - points
+	 * @throws PlaypalException
+	 */
+	public Integer updateWeeklyProgressPoints(Long userId) throws PlaypalException {
+		int pointsAwarded = 0;
+
+		try {
+			/* Got to previous week */
+			Date ts = getTodayStart();
+			ts.setTime(ts.getTime() - 1000 * 60 * 60 * 12);
+			int weekPoints = getUserWeeklyPoints(userId, ts, 0);
+			int previousWeekPoints = getUserWeeklyPoints(userId, ts, 1);
+
+			for (VariablePerWeek vpw : VariablePerWeek.values()) {
+				checkAndAwardVariablePerWeekPoints(userId, vpw, weekPoints, previousWeekPoints, ts);
+			}
+		} catch (Exception e) {
+			throw new PlaypalException("Error while calculating weekly progress points.", e);
+		}
+
+		return pointsAwarded;
+	}
+
+	public void updateWeightPoints(Long userId) throws PlaypalException {
+		try {
+			if (goal == null) {
+				throw new PlaypalException("Health Goal is not set yet.");
+			}
+
+			double idealWeight = goal.getIdealWeight();
+			idealWeight = CommonUtils.convertKGsToLBs(idealWeight);
+			LastThreeWeightsDTO ltws = sc.getLastThreeWeights(userId);
+
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, UpdateWeight.name(),
+					getTodayStart(), getTodayEnd());
+
+			checkAndAwardFixPerDayPoints(userId, UpdateWeightFixed);
+			checkAndAwardVariablePerDayPoints(userId, UpdateWeight, 0, 0, 0, 0, ltws.getCurrentWeight(),
+					ltws.getPreviousWeight(), ltws.getPrePreviousWeight(), idealWeight, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+			/*
+			 * checkAndAwardVariablePerDayPoints(userId, UpdateWeight, 0, 0, 0, 0,
+			 * ltws.getCurrentWeight(), ltws.getPreviousWeight(),
+			 * ltws.getPrePreviousWeight(), idealWeight);
+			 */
+
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+	}
+
+	public void updateNutritionPoints(Long userId) throws PlaypalException {
+		Date todayEnd = getTodayEnd();
+
+		try {
+			List<FoodIntake> foodIntakes = foodIntakeSvc.getFoodIntakes(userId, todayEnd);
+			handleFixedNutritionPoints(userId, foodIntakes);
+		} catch (Exception e) {
+			logger.warn("Could not allocate fixed nutrition points:\n" + e.getMessage());
+		}
+
+		try {
+			int waterGalseesTaken = 0;
+			List<FoodCompositionIntake> fci = foodIntakeSvc.getFoodIntakeSummary(userId, todayEnd).getWater();
+			for (FoodCompositionIntake foodCompositionIntake : fci) {
+				waterGalseesTaken += foodCompositionIntake.getQuantity();
+			}
+
+			try {
+				rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, ReportWater.name(),
+						getTodayStart(), getTodayEnd());
+			} catch (Exception e) {
+				logger.warn(e.getMessage());
+			}
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.ReportWater, 0, 0, waterGalseesTaken, 0, 0, 0, 0,
+					0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.ReportBreakfast, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.ReportLunch, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.ReportSnacks, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, 0);
+			/*
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.ReportWater, 0, 0,
+			 * waterGalseesTaken, 0, 0, 0, 0, 0);
+			 */
+		} catch (Exception e) {
+			logger.warn("Could not allocate variable water points:\n" + e.getMessage());
+		}
+	}
+
+	public void updatePhysicalPoints(Long userId) throws PlaypalException {
+		try {
+			UserSourceDayId id = new UserSourceDayId(userId, getTodayEnd());
+			ActivitiesSummary as = activitySvc.getActivities(id);
+
+			int caloriesBurnt = as.getCalories().getValue();
+			int stepsTaken = as.getSteps().getValue();
+			int workoutTime = as.getActiveTime().getValue();
+			int heartRate = as.getHeartRate().getValue();
+			int cyclingTime = as.getCycling().getValue();
+			int swimmingDistanceTime = as.getSwimmingDistance().getValue();
+			int diastolicbloodpressureTime = as.getDiastolicBloodPressure().getValue();
+			int systolicBloodPressureTime = as.getSystolicBloodPressure().getValue();
+			int pushUpsTime = as.getPushes().getValue();
+			int flightsClimbedTime = as.getFlightsClimbed().getValue();
+			int walkingPlusRunningDistance = as.getWalkingPlusRunningDistance().getValue();
+			int bodytemperature = as.getBodyTemprature().getValue();
+
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Cycling, 0, 0, 0, 0, 0, 0, 0, 0, cyclingTime, 0, 0,
+					0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.SwimmingDistance, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					swimmingDistanceTime, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Heartrate, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					heartRate, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Diastolicbloodpressure, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, diastolicbloodpressureTime, 0, 0, 0, 0);
+
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Systolicbloodpressure, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, systolicBloodPressureTime, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Bodytemperature, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, bodytemperature, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.WalkingPlusRunningDistance, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, 0, 0, 0, 0, walkingPlusRunningDistance);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Steps0, stepsTaken, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Steps1, stepsTaken, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Steps2, stepsTaken, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.Steps3, stepsTaken, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.PushUps, 0, 0, 0, 0, 0, 0, 0, 0, 0, pushUpsTime, 0,
+					0, 0, 0, 0, 0, 0);
+			checkAndAwardVariablePerDayPoints(userId, VariablePerDay.FlightsClimbed, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					flightsClimbedTime, 0, 0, 0, 0, 0, 0);
+			/*
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.CBAndSTInADay,
+			 * stepsTaken, caloriesBurnt, 0, workoutTime, 0, 0, 0, 0);
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.CBMileStoneHit,
+			 * stepsTaken, caloriesBurnt, 0, workoutTime, 0, 0, 0, 0);
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.CBLinearPoints,
+			 * stepsTaken, caloriesBurnt, 0, workoutTime, 0, 0, 0, 0);
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.STMileStoneHit,
+			 * stepsTaken, caloriesBurnt, 0, workoutTime, 0, 0, 0, 0);
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.STLinearPoints,
+			 * stepsTaken, caloriesBurnt, 0, workoutTime, 0, 0, 0, 0);
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.WTMileStoneHit,
+			 * stepsTaken, caloriesBurnt, 0, workoutTime, 0, 0, 0, 0);
+			 * checkAndAwardVariablePerDayPoints(userId, VariablePerDay.WTLinearPoints,
+			 * stepsTaken, caloriesBurnt, 0, workoutTime, 0, 0, 0, 0);
+			 */
+
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+	}
+
+	public void handleVariableNutritionPoints(Long userId) throws UDCException, PlaypalException {
+		List<Nutrition> nutrients = healthTrackSvc.getGoalNutrients(userId, getTodayEnd());
+		int goalCalories = (int) goal.dailyCaloriesDifference();
+		boolean noNutrientLimitExceeded = true;
+		int totalCaloriesConsumed = 0;
+		for (Nutrition nutrient : nutrients) {
+			totalCaloriesConsumed += nutrient.getIntakeValue();
+			if (Math.abs(nutrient.getIntakeValue() - nutrient.getGoalValue()) > 5) {
+				noNutrientLimitExceeded = false;
+			}
+		}
+
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId,
+					NoNutrientLimitExceeded.name(), getTodayStart(), getTodayEnd());
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+
+		if (noNutrientLimitExceeded) {
+			checkAndAwardVariablePerDayPoints(userId, NoNutrientLimitExceeded, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0);
+		}
+
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId,
+					CalorieLimitNotExceeded.name(), getTodayStart(), getTodayEnd());
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+
+		if (Math.abs(totalCaloriesConsumed - goalCalories) < 50) {
+			checkAndAwardVariablePerDayPoints(userId, CalorieLimitNotExceeded, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+					0, 0, 0);
+		}
+	}
+
+	private void handleFixedNutritionPoints(Long userId, List<FoodIntake> foodIntakes) throws PlaypalException {
+		int completion = 0;
+
+		Date todayStart = getTodayStart();
+		Date todayEnd = getTodayEnd();
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, ReportBreakfast.name(),
+					todayStart, todayEnd);
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, ReportLunch.name(),
+					todayStart, todayEnd);
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, ReportDinner.name(),
+					todayStart, todayEnd);
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, ReportSnack.name(),
+					todayStart, todayEnd);
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, ReportWaterFixed.name(),
+					todayStart, todayEnd);
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+
+		for (FoodIntake foodIntake : foodIntakes) {
+			if (foodIntake.getFood() != null && !foodIntake.getFood().isEmpty()) {
+				MealType mt = foodIntake.getMealType();
+				switch (mt) {
+				case BRE:
+					checkAndAwardFixPerDayPoints(userId, ReportBreakfast);
+					completion++;
+					break;
+				case LUN:
+					checkAndAwardFixPerDayPoints(userId, ReportLunch);
+					completion++;
+					break;
+				case DIN:
+					checkAndAwardFixPerDayPoints(userId, ReportDinner);
+					completion++;
+					break;
+				case SNA:
+					checkAndAwardFixPerDayPoints(userId, ReportSnack);
+					break;
+				case WAT:
+					if (foodIntake.getFood().get(0).getQuantity() > 0) {
+						checkAndAwardFixPerDayPoints(userId, ReportWaterFixed);
+						completion++;
+					}
+					break;
+				}
+			}
+		}
+
+		try {
+			rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, CompleteDayReport.name(),
+					todayStart, todayEnd);
+		} catch (Exception e) {
+			logger.warn(e.getMessage());
+		}
+		if (completion == 4) {
+			checkAndAwardFixPerDayPoints(userId, CompleteDayReport);
+		}
+	}
+
+	private boolean alreadyAwarded(Long userId, String rewardEvent, boolean today) throws PlaypalException {
+
+		try {
+			List<RewardPointsEvent> rpe;
+			if (today) {
+				if (!FixedPerDay.contains(rewardEvent)) {
+					throw new PlaypalException("Unknown Event Code: '" + rewardEvent + "'");
+				}
+
+				Date todayStart = getTodayStart();
+				Date todayEnd = getTodayEnd();
+
+				rpe = rewardPointsEventRepo.findAllByUserIdAndEventTypeAndCreatedDateBetween(userId, rewardEvent,
+						todayStart, todayEnd);
+			} else {
+				if (!Fixed.contains(rewardEvent)) {
+					throw new PlaypalException("Unknown Event Code: '" + rewardEvent + "'");
+				}
+
+				rpe = rewardPointsEventRepo.findAllByUserIdAndEventType(userId, rewardEvent);
+			}
+
+			if (rpe != null && !rpe.isEmpty()) {
+				logger.info("Listing reward events........");
+				for (RewardPointsEvent rewardPointsEvent : rpe) {
+					logger.info(rewardPointsEvent.toString());
+				}
+
+				return true;
+			}
+		} catch (PlaypalException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalException("Error while checking reward event occurrance! No points will be awarded.", e);
+		}
+
+		return false;
+	}
+
+	private boolean alreadyAwardedinWeek(Long userId, String rewardEvent, Date weekDay) throws PlaypalException {
+
+		try {
+			List<RewardPointsEvent> rpe;
+			if (!VariablePerWeek.contains(rewardEvent)) {
+				throw new PlaypalException("Unknown Event Code: '" + rewardEvent + "'");
+			}
+
+			Date ws = getWeekStart(weekDay);
+			Date we = getWeekEnd(weekDay);
+
+			rpe = rewardPointsEventRepo.findAllByUserIdAndEventTypeAndCreatedDateBetween(userId, rewardEvent, ws, we);
+
+			if (rpe != null && !rpe.isEmpty()) {
+				logger.info("Listing Weekly reward events........");
+				for (RewardPointsEvent rewardPointsEvent : rpe) {
+					logger.info(rewardPointsEvent.toString());
+				}
+
+				return true;
+			}
+		} catch (PlaypalException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalException("Error while checking reward event occurrance! No points will be awarded.", e);
+		}
+
+		return false;
+	}
+
+	/*
+	 * private synchronized Integer checkAndAwardVariablePerDayPoints(Long userId,
+	 * VariablePerDay event, int stepsTaken, int caloriesBurnt, int
+	 * waterGlassesTaken, int workoutTime, double weightInLBs, double
+	 * prevWeightInLBs, double prePrevWeightInLBs, double idealWeightInLBs) throws
+	 * PlaypalException {
+	 */
+
+	private synchronized Integer checkAndAwardVariablePerDayPoints(Long userId, VariablePerDay event, int stepsTaken,
+			int caloriesBurnt, int waterGlassesTaken, int workoutTime, double weightInLBs, double previousWeightInLBs,
+			double prePreviousWeightInLBs, double idealWeightInLBs, int cyclingTime, int pushUpsTime,
+			int flightsClimbedTime, int swimmingDistanceTime, int diastolicbloodpressure, int systolicbloodpressure,
+			int heartrate, int bodyTemprature, int WalkingPlusRunningDistance) throws PlaypalException {
+		try {
+			int pointsAwarded = rewardPointsCalc.calculateVariablePerDayPoints(event, stepsTaken, caloriesBurnt,
+					waterGlassesTaken, workoutTime, weightInLBs, previousWeightInLBs, prePreviousWeightInLBs,
+					idealWeightInLBs, cyclingTime, pushUpsTime, flightsClimbedTime, swimmingDistanceTime,
+					diastolicbloodpressure, systolicbloodpressure, heartrate, bodyTemprature,
+					WalkingPlusRunningDistance);
+
+			Date now = new Date(System.currentTimeMillis());
+			Date todayStart = getDayStart(now);
+			Date todayEnd = getDayEnd(now);
+
+			int previousPoints = getDailyUserRewardPointsByEventType(userId, event.name(), now);
+			if (event.equals(VariablePerDay.UpdateWeight) && pointsAwarded == 1000) {
+				List<RewardPointsEvent> es = rewardPointsEventRepo
+						.findAllByUserIdAndPointsTypeAndPointsAndCreatedDateBetween(userId,
+								getActivityType(event.name()).name(), pointsAwarded, todayStart, todayEnd);
+				if (es != null) {
+					return 0;
+				}
+			}
+
+			if (previousPoints > 0) {
+				rewardPointsEventRepo.deleteByUserIdAndEventTypeAndCreatedDateBetween(userId, event.name(), todayStart,
+						todayEnd);
+			}
+
+			RewardPointsEvent rpe = new RewardPointsEvent(userId, event.name(), getActivityType(event.name()).name(),
+					pointsAwarded, now, "");
+			rewardPointsEventRepo.save(rpe);
+
+			int aggregatePoints = pointsAwarded - previousPoints;
+			logger.info("P: '" + pointsAwarded + "', PP: '" + previousPoints + "', AGP: '" + aggregatePoints + "'");
+			try {
+				UserRewardPoints urp = userRewardPointsRepo.findFirst1ByUserIdAndCreatedDateBeforeOrderByIdDesc(userId,
+						now);
+				if (urp != null) {
+					aggregatePoints += urp.getPoints();
+				}
+			} catch (Exception e) {
+				logger.info("Looks like no points awarded to user id : '" + userId + "' yet!");
+			}
+
+			logger.info("P: '" + pointsAwarded + "', PP: '" + previousPoints + "', AGP: '" + aggregatePoints + "'");
+			UserRewardPoints urp = new UserRewardPoints(userId, aggregatePoints, now);
+			userRewardPointsRepo.save(urp);
+
+			return pointsAwarded;
+		} catch (PlaypalException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+	}
+
+	private Integer checkAndAwardVariablePerWeekPoints(Long userId, VariablePerWeek event, int weekPoints,
+			int previousWeekPoints, Date weekDay) throws PlaypalException {
+		try {
+			if (alreadyAwardedinWeek(userId, event.name(), weekDay)) {
+				return 0;
+			}
+
+			int pointsAwarded = rewardPointsCalc.calculateWeeklyProgressPoints(event, weekPoints, previousWeekPoints);
+
+			Date now = new Date(System.currentTimeMillis());
+
+			RewardPointsEvent rpe = new RewardPointsEvent(userId, event.name(), getActivityType(event.name()).name(),
+					pointsAwarded, now, "");
+			rewardPointsEventRepo.save(rpe);
+
+			int aggregatePoints = pointsAwarded;
+			UserRewardPoints urp = userRewardPointsRepo.findFirst1ByUserIdAndCreatedDateBeforeOrderByIdDesc(userId,
+					now);
+			if (urp != null) {
+				aggregatePoints += urp.getPoints();
+			}
+
+			urp = new UserRewardPoints(userId, aggregatePoints, now);
+			userRewardPointsRepo.save(urp);
+
+			return pointsAwarded;
+		} catch (PlaypalException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+	}
+
+	private Integer checkAndAwardFixPerDayPoints(Long userId, FixedPerDay event) throws PlaypalException {
+		try {
+			if (alreadyAwarded(userId, event.name(), true)) {
+				return 0;
+			}
+
+			int pointsAwarded = rewardPointsCalc.calculateFixedPerDayPoints(event);
+
+			Date now = new Date(System.currentTimeMillis());
+
+			RewardPointsEvent rpe = new RewardPointsEvent(userId, event.name(), getActivityType(event.name()).name(),
+					pointsAwarded, now, "");
+			rewardPointsEventRepo.save(rpe);
+
+			int aggregatePoints = pointsAwarded;
+			UserRewardPoints urp = userRewardPointsRepo.findFirst1ByUserIdAndCreatedDateBeforeOrderByIdDesc(userId,
+					now);
+			if (urp != null) {
+				aggregatePoints += urp.getPoints();
+			}
+
+			urp = new UserRewardPoints(userId, aggregatePoints, now);
+			userRewardPointsRepo.save(urp);
+
+			return pointsAwarded;
+		} catch (PlaypalException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalException(e);
+		}
+	}
+
+	private ActivityType getActivityType(String event) {
+
+		try {
+			return FixedPerDay.valueOf(event).getActivityType();
+		} catch (Exception e) {
+			logger.debug("No ActivityType found for " + event + " in FixedPerDay enum");
+		}
+
+		try {
+			return VariablePerDay.valueOf(event).getActivityType();
+		} catch (Exception e) {
+			logger.debug("No ActivityType found for " + event + " in VariablePerDay enum");
+		}
+
+		try {
+			return Fixed.valueOf(event).getActivityType();
+		} catch (Exception e) {
+			logger.debug("No ActivityType found for " + event + " in Fixed enum");
+		}
+
+		logger.warn("No ActivityType found for " + event + " in Any enum enum");
+
+		return Other;
+	}
+
+	@PostConstruct
+	public void startDaemon() {
+		new Thread(pcd).start();
+	}
+}

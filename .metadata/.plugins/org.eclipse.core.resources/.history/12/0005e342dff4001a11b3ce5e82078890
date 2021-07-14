@@ -1,0 +1,669 @@
+/**
+ * 
+ */
+package com.playpal.udc.healthtrack;
+
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import javax.xml.bind.ParseConversionEvent;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import com.playpal.dto.FoodComposition;
+import com.playpal.dto.FoodCompositionIntake;
+import com.playpal.dto.Nutrition;
+import com.playpal.dto.UserProfile;
+import com.playpal.enums.NutrientName;
+import com.playpal.udc.ServicesClient;
+import com.playpal.udc.activity.ActivityManager;
+import com.playpal.udc.foodintake.FoodIntakeAPI;
+import com.playpal.udc.foodintake.FoodIntakeManager;
+import com.playpal.udc.foodintake.model.NutritionIntake;
+import com.playpal.udc.healthtrack.model.RecommendedNutrient;
+import com.playpal.udc.healthtrack.model.RecommendedNutrientRepo;
+import com.playpal.util.CommonUtils;
+import com.playpal.dto.UserProfile.ACTIVITY_LEVEL;
+import com.playpal.dto.UserProfile.GENDER;
+
+/**
+ * @author bali
+ *
+ */
+@Service
+public class HealthGoalComputation {
+	
+	// body mass index
+	private double bmi;
+	// bmr
+	private double bmr;
+
+	// Calories needed to maintain weight (TEE)
+	private double tee;
+	// Ideal Weight
+	private double idealWeight;
+	// BMR at ideal weight
+	private double bmrAtIdealWeight;
+	// Calories Intake at ideal weight
+	private double intakeCaloriesAtIdealWeight;
+	// Daily Calories Difference (Goal)
+	private double dailyCaloriesDifference;
+	// Raw Exercise (Cal)
+	private double rawExerciseCalories;
+	// Recommended Exercise
+	private double recommendedExercise;
+	// Recommended Calories
+	private double recommendedCalories;
+
+	// recommended nutrients with values
+	private List<Nutrition> recommendedNutrients;
+	// nutrients from usda database
+	private List<Nutrition> ediNutritions;
+	// user profile
+	private UserProfile userProfile;
+	private double dailyGoalintake;
+	private double dailyGoalBurnt;
+	private double hicoScore;
+	 DecimalFormat df1 = new DecimalFormat("#.");
+	 DecimalFormat df= new DecimalFormat("#.0");
+
+	@Autowired
+	private RecommendedNutrientRepo recNutRepo;
+	@Autowired
+	private FoodIntakeAPI foodIntakeManager;
+	@Autowired
+	private FoodIntakeManager foodIntakeValue;
+	@Autowired
+	private ServicesClient servicesClient;
+
+	private static final Logger LOG = LoggerFactory.getLogger(HealthGoalComputation.class);
+
+	public HealthGoalComputation computeCaloriesGoalOnly(UserProfile userProfile) {
+		this.userProfile = userProfile;
+		computeCaloriesGoal();
+		
+		return this;
+	}
+
+	public HealthGoalComputation computeNutrientsAndCaloriesGoal(UserProfile userProfile, Date date) {
+		this.userProfile = userProfile;
+		this.recommendedNutrients = new ArrayList<>();
+		this.ediNutritions = servicesClient.getAllNutrients();
+		computeCaloriesGoal();
+		computeNutrientsGoal(date);
+		calculateHICO(date);
+    	System.out.println("date ::"+date);
+
+		return this;
+	}
+
+	/**
+	 * Calculation details from algorithm detail excel sheet
+	 * 
+	 * E = OBESE column
+	 * 
+	 * user inputs : E2 = Height, E3 = Weight, E4 = Age, E5 = Gender, E6 = Activity
+	 * Level
+	 */
+	private void computeCaloriesGoal() {
+
+		/*
+		 * 1. BMI
+		 */
+		calculateBMI();
+
+		/*
+		 * 2. BMR
+		 */
+		calculateBMR();
+
+		/*
+		 * 3. Calories needed to maintain weight (TEE)
+		 */
+		calculateTEE();
+
+		/*
+		 * 4. Ideal Weight
+		 */
+		calculateIdealWeight();
+
+		/*
+		 * 5. BMR at ideal weight
+		 * 
+		 */
+		calculateBmrAtIdealWeight();
+
+		/*
+		 * 6. Calories Intake at ideal weight
+		 */
+		calculateIntakeCaloriesAtIdealWeight();
+
+		/*
+		 * 7. Daily Calories Difference (Goal)
+		 */
+//		calculateDailyCaloriesDifference();
+
+		/*
+		 * 8. Raw Exercise (Cal)
+		 */
+//		calculateRawExerciseCalories();
+
+		/*
+		 * 9. Recommended exercise
+		 */
+//		calculateRecommendedCalories();
+
+		/*
+		 * 10. Recommended calories
+		 * 
+		 * =E16+E11+E18
+		 */
+		calculateGoalCalories();
+		
+		
+		recommendedCalories = dailyCaloriesDifference + bmr + recommendedExercise;
+
+	}
+
+	/**
+	 * =IF(E17<300,E17-E17+300,
+	 * 
+	 * IF(AND(E17>500, E6 = "Sedentary"),E17-(E17-500),
+	 * 
+	 * IF(AND(E17>650, E6 = "Lightly Active"),E17-(E17-650),
+	 * 
+	 * IF(AND(E17>750, E6 = "Moderately Active"),E17-(E17-750),
+	 * 
+	 * IF(AND(E17>900, E6 = "Very Active"),E17-(E17-900),
+	 * 
+	 * IF(AND(E17>1000, E6 = "Extra Active"),E17-(E17-1000),
+	 * 
+	 * E17 ))))))
+	 */
+	private void calculateRecommendedCalories() {
+		if (rawExerciseCalories < 300)
+			recommendedExercise = rawExerciseCalories - (rawExerciseCalories - 300);
+
+		else if (rawExerciseCalories > 500 && ACTIVITY_LEVEL.SED.equals(userProfile.getActivityLevel()))
+			recommendedExercise = rawExerciseCalories - (rawExerciseCalories - 500);
+
+		else if (rawExerciseCalories > 650 && ACTIVITY_LEVEL.LAC.equals(userProfile.getActivityLevel()))
+			recommendedExercise = rawExerciseCalories - (rawExerciseCalories - 650);
+
+		else if (rawExerciseCalories > 750 && ACTIVITY_LEVEL.MAC.equals(userProfile.getActivityLevel()))
+			recommendedExercise = rawExerciseCalories - (rawExerciseCalories - 750);
+
+		else if (rawExerciseCalories > 900 && ACTIVITY_LEVEL.VAC.equals(userProfile.getActivityLevel()))
+			recommendedExercise = rawExerciseCalories - (rawExerciseCalories - 900);
+
+		else if (rawExerciseCalories > 1000 && ACTIVITY_LEVEL.EAC.equals(userProfile.getActivityLevel()))
+			recommendedExercise = rawExerciseCalories - (rawExerciseCalories - 1000);
+
+		else
+			recommendedExercise = rawExerciseCalories;
+
+	}
+
+	/**
+	 * =E12-E16-E11
+	 */
+	private void calculateRawExerciseCalories() {
+		rawExerciseCalories = tee - dailyCaloriesDifference - bmr;
+	}
+
+	/**
+	 * =IF((E15-E12)<-1000,-1000,
+	 * 
+	 * IF((E15-E12)>1000,1000,
+	 * 
+	 * IF(AND(E10<25,E10>18.5),(E15-E12)*2,
+	 * 
+	 * IF(AND(E10>25,(E15-E12)>-350),-350,
+	 * 
+	 * IF(AND(E10<18.5,(E15-E12)<350),350,
+	 * 
+	 * (E15-E12))))))
+	 */
+	private void calculateDailyCaloriesDifference() {
+		if ((intakeCaloriesAtIdealWeight - tee) < -1000)
+			dailyCaloriesDifference = -1000;
+
+		else if ((intakeCaloriesAtIdealWeight - tee) > 1000)
+			dailyCaloriesDifference = 1000;
+
+		else if (bmi < 25 && bmi > 18.5)
+			dailyCaloriesDifference = (intakeCaloriesAtIdealWeight - tee) * 2;
+
+		else if (bmi > 25 && (intakeCaloriesAtIdealWeight - tee) > -350)
+			dailyCaloriesDifference = -350;
+
+		else if (bmi < 18.5 && (intakeCaloriesAtIdealWeight - tee) < 350)
+			dailyCaloriesDifference = 350;
+
+		else
+			dailyCaloriesDifference = (intakeCaloriesAtIdealWeight - tee);
+
+	}
+
+	/**
+	 * =IF(E6="Sedentary",E14*1.2,
+	 * 
+	 * IF(E6="Lightly Active",E14*1.375,
+	 * 
+	 * IF(E6="Moderately Active",E14*1.55,
+	 * 
+	 * IF(E6="Very Active",E14*1.725,
+	 * 
+	 * E14*1.9))))
+	 */
+	private void calculateIntakeCaloriesAtIdealWeight() {
+		switch (userProfile.getActivityLevel()) {
+		case SED:
+			intakeCaloriesAtIdealWeight = Double.parseDouble(df.format(bmrAtIdealWeight * 1.2));
+			
+			break;
+		case LAC:
+			intakeCaloriesAtIdealWeight = Double.parseDouble(df.format(bmrAtIdealWeight * 1.375));
+			break;
+		case MAC:
+			intakeCaloriesAtIdealWeight = Double.parseDouble(df.format(bmrAtIdealWeight * 1.55));
+			break;
+		case VAC:
+			intakeCaloriesAtIdealWeight = Double.parseDouble(df.format(bmrAtIdealWeight * 1.725));
+			break;
+		case EAC:
+			intakeCaloriesAtIdealWeight = Double.parseDouble(df.format(bmrAtIdealWeight * 1.9));
+			break;
+		default:
+			break;
+		}
+	}
+
+	/**
+	 * =IF(ISBLANK(E2),"Please add Height(cms)",
+	 * 
+	 * IF(ISBLANK(E3) ,"Please add Weight(kgs)",
+	 * 
+	 * IF(ISBLANK(E4),"Please add age",
+	 * 
+	 * IF(E5="Male",88.362 +(13.397*E13)+(4.799*E2)-(5.677*E4),
+	 * 
+	 * 447.593+(9.247*E13)+(3.098*E2)-(4.33*E4)))))
+	 */
+	private void calculateBmrAtIdealWeight() {
+		if (GENDER.MALE.equals(userProfile.getGender()))
+			bmrAtIdealWeight= Double.parseDouble( df.format( 88.362 + (13.397 * idealWeight) + (4.799 * userProfile.getHeight())
+					- (5.677 * userProfile.getAge())));
+		else
+			bmrAtIdealWeight = Double.parseDouble( df.format(447.593 + (9.247 * idealWeight) + (3.098 * userProfile.getHeight())
+					- (4.33 * userProfile.getAge())));
+	}
+
+	/**
+	 * =IF(ISBLANK(E2),"",IF(AND( E6 = "Extra Active",
+	 * E10>27),(25+30)*0.5*(E2^2)/10000,(25+18.5)*0.5*(E2^2)/10000))
+	 */
+//    private void calculateIdealWeight() {
+//        if (UserProfile.ACTIVITY_LEVEL.EAC.equals(userProfile.getActivityLevel()) && bmi > 27)
+//            idealWeight = (25 + 30) * 0.5 * (userProfile.getHeight() * userProfile.getHeight()) / 10000;
+//        else
+//            idealWeight = (25 + 18.5) * 0.5 * (userProfile.getHeight() * userProfile.getHeight()) / 10000;
+//    }
+
+	private void calculateIdealWeight() {
+//        if (UserProfile.ACTIVITY_LEVEL.EAC.equals(userProfile.getActivityLevel()) && bmi > 27)
+//            idealWeight = (25 + 30) * 0.5 * (userProfile.getWeight() * userProfile.getWeight()) / 10000;
+//        else
+		idealWeight =Double.parseDouble(df1.format((25 + 18.5) * 0.5 * (userProfile.getHeight() * userProfile.getHeight()) / 10000)) ;
+		
+	}
+
+	/**
+	 * =IF(E6="Sedentary",E11*1.2,
+	 * 
+	 * IF(E6="Lightly Active",E11*1.375,
+	 * 
+	 * IF(E6="Moderately Active",E11*1.55,
+	 * 
+	 * IF(E6="Very Active",E11*1.725,
+	 * 
+	 * E11*1.9))))
+	 */
+	private void calculateTEE() {
+		switch (userProfile.getActivityLevel()) {
+		case SED:
+			tee = Double.parseDouble(df.format(bmr * 1.2)) ;
+			
+
+			break;
+		case LAC:
+			tee = Double.parseDouble(df.format(bmr * 1.375));
+			
+			
+			break;
+		case MAC:
+			tee = Double.parseDouble(df.format(bmr * 1.55));
+			
+			
+			break;
+		case VAC:
+			tee = Double.parseDouble(df.format(bmr * 1.725));
+			
+			
+			break;
+		case EAC:
+			tee =Double.parseDouble(df.format( bmr * 1.9));
+			
+			
+			break;
+		default:
+			break;
+		}
+
+	}
+
+	/**
+	 * =IF(ISBLANK(E2),"Please add Height(cms)",IF(ISBLANK(E3) ,"Please add
+	 * Weight(kgs)",IF(ISBLANK(E4),"Please add age",IF(E5="Male",88.362
+	 * +(13.397*E3)+(4.799*E2)-(5.677*E4),447.593+(9.247*E3)+(3.098*E2)-(4.33*E4))))
+	 * )
+	 */
+	private void calculateBMR() {
+		
+		if (UserProfile.GENDER.MALE.equals(userProfile.getGender())) {
+			bmr = Double.parseDouble(df.format(88.362 + (13.397 * userProfile.getWeight()) + (4.799 * userProfile.getHeight())
+					- (5.677 * userProfile.getAge())));
+			
+
+		} else {
+			bmr = Double.parseDouble(df.format(447.593 + (9.247 * userProfile.getWeight()) + (3.098 * userProfile.getHeight())
+					- (4.33 * userProfile.getAge())));
+
+			
+		}
+	}
+
+
+	
+	public void calculateGoalCalories() {
+		
+//		int requiredCalorieswithInterval = (int) Math.round(tee/100.0) * 100;
+		int requiredCalorieswithInterval = (int)(requiredCaloriesInterval( tee)) ;
+		double userWeight = Double.parseDouble(df1.format(userProfile.getWeight())) ;
+		
+		 
+		if (userWeight == idealWeight) {
+			dailyGoalintake =  requiredCalorieswithInterval;
+			dailyGoalBurnt= requiredCalorieswithInterval;
+		}
+
+		if (userWeight > idealWeight) {
+
+		
+				dailyGoalintake =  ((requiredCalorieswithInterval - 100));
+			
+			
+			
+			dailyGoalBurnt =  ((requiredCalorieswithInterval - 100) + 250);
+		}
+
+		if (userWeight < idealWeight) {
+
+			dailyGoalintake =  ((requiredCalorieswithInterval + 100) );
+			dailyGoalBurnt =  ((requiredCalorieswithInterval + 100) - 250);
+
+		}
+
+	}
+
+	/**
+	 * =IF(ISBLANK(E2),"",E3*10000/(E2*E2))
+	 */
+	private void calculateBMI() {
+		if (userProfile.getHeight() > 0 && userProfile.getWeight() > 0)
+			bmi =Double.parseDouble(df.format(CommonUtils.calculateBMI(userProfile.getWeight(), userProfile.getHeight())));
+		
+	}
+	public void calculateHICO (Date date){
+		/*
+		 * Recommended calorie intake = n 
+		 * Actual calorie intake = p
+		 *  Recommended calories to be burned = s 
+		 * Actual calories burnt = t 
+		 * BMR = b
+		 * 
+		 * HICOFormula = [ 5.5*(1 - {(b+t-p)-(s-n)} / (s-n)) ] + [ 1.75*{1 - (p-n)/n} ] + [ 1.75*{1 - (s-t)/s} ]
+		 */
+//		double intakeValue = 0d;
+		double caloriesburnt =650;
+		
+
+		int intakeValue = 0;
+    	System.out.println("intakeValue ::"+foodIntakeValue.getIntakeCalories(userProfile.getUserId(),date));
+
+//		double intakeValue = 2000;
+		
+//		hicoScore = (5.5*(1 - ((bmrAtIdealWeight+t-intakeValue)-(dailyGoalBurnt-dailyGoalintake)) / (dailyGoalBurnt-dailyGoalintake)))  + ( 1.75*(1 - (intakeValue-dailyGoalintake)/dailyGoalintake) ) + ( 1.75*(1 - (dailyGoalBurnt-t)/dailyGoalBurnt));
+
+		 
+		double A = Double.parseDouble(df.format(5.5*(1 - (Math.abs((bmr+caloriesburnt-intakeValue)-(dailyGoalBurnt-dailyGoalintake))) / Math.abs((dailyGoalBurnt-dailyGoalintake)))));
+	
+		System.out.println("value of A ::" +A );
+		double B =  Double.parseDouble(df.format(1.75*(1 - Math.abs((intakeValue-dailyGoalintake)/dailyGoalintake)) )) ;
+		System.out.println("value of B :: ::"+B);
+		
+		double C = Double.parseDouble(df.format( 1.75*(1 - Math.abs((dailyGoalBurnt-caloriesburnt)/dailyGoalBurnt))));
+		System.out.println("value of B :: ::"+C);
+		hicoScore = A+B+C;
+		System.out.println("value of hicoScore:: ::"+hicoScore);
+		
+	}
+	public double requiredCaloriesInterval(double value){
+        double remainder = value %100;
+        if(remainder > 50){
+            value = value-(remainder-50);
+        }else if(remainder < 50){
+            value = value - remainder;
+        }
+        return value;
+    }
+
+	// =============== Nutrition Recommendation ===================//
+	private void computeNutrientsGoal(Date date) {
+		int recommendedFoodCalaories = (int) getRecommendedFoodCalories();
+		String bmiCat = CommonUtils.getBMICategory(userProfile.getHeight(), userProfile.getWeight()).getBmi();
+		// get recommended nutrients for the user
+		LOG.debug("Food Goal Calories {}, BMI category {}", recommendedFoodCalaories, bmiCat);
+		List<RecommendedNutrient> recNutrients = recNutRepo.findAllByNativeQuery(
+				userProfile.getGender().getDisplayName(), bmiCat, userProfile.getCurrentDiseasesId());
+
+		// convert to type <Nutrition>
+		if (null != recNutrients && !recNutrients.isEmpty()) {
+			List<Long> recNtrIds = recNutrients.stream().map(RecommendedNutrient::getNutrientId)
+					.collect(Collectors.toList());
+			List<NutritionIntake> intakeNutrs = foodIntakeManager.getIntakeNutrition(userProfile.getUserId(), date,
+					recNtrIds);
+			for (RecommendedNutrient recNutrient : recNutrients) {
+				Nutrition nutrient = getNutrientById(recNutrient.getNutrientId());
+				if ("%".equals(recNutrient.getUnit())) {
+					// intake nutrient value
+					Optional<NutritionIntake> nutIntake = intakeNutrs.stream()
+							.filter(ni -> ni.getNutrientId().equals(recNutrient.getNutrientId())).findFirst();
+					double intakeValue = 0d;
+					if (nutIntake.isPresent())
+						intakeValue = nutIntake.get().getNutrientValue();
+					nutrient.setIntakeValue(intakeValue);
+
+					// goal nutrient value
+					nutrient.setGoalValue(convertPercentToGram(recNutrient, recommendedFoodCalaories));
+					recommendedNutrients.add(nutrient);
+
+				} else {
+					// intake nutrient value
+					Optional<NutritionIntake> nutIntake = intakeNutrs.stream()
+							.filter(ni -> ni.getNutrientId().equals(recNutrient.getNutrientId())).findFirst();
+					double intakeValue = 0d;
+					if (nutIntake.isPresent())
+						intakeValue = nutIntake.get().getNutrientValue();
+					nutrient.setIntakeValue(intakeValue);
+					// goal nutrient value
+					nutrient.setGoalValue(recNutrient.getMin());
+					recommendedNutrients.add(nutrient);
+				}
+
+			}
+		}
+	}
+
+	/**
+	 * @param nutrientId
+	 * @return
+	 */
+	private Nutrition getNutrientById(Long nutrientId) {
+		Nutrition nutrition = new Nutrition();
+		return ediNutritions.stream().filter(n -> n.getId().longValue() == nutrientId).findFirst().orElse(nutrition);
+	}
+
+	/**
+	 * e.g. 30 % (recommended carbs) of goalCalaories kCal will convert to gram
+	 * 
+	 * @param rn
+	 * @param recommendedFoodCalaories
+	 * @return
+	 */
+	private double convertPercentToGram(RecommendedNutrient rn, double recommendedFoodCalaories) {
+		LOG.debug("Percent to Gram : if foodGoal = {} and {}", recommendedFoodCalaories, rn);
+		Double minValueInPercent = rn.getMin();
+		double gram = 0;
+		if (recommendedFoodCalaories > 0 && minValueInPercent > 0) {
+			double kCals = (minValueInPercent * recommendedFoodCalaories) / 100;
+			NutrientName nn = NutrientName.findById(rn.getNutrientId());
+			if (null != nn)
+				switch (nn) {
+				case CARBOHYDRATE:
+					// using 1g = 4 kCal
+					gram = kCals / 4;
+					break;
+				case PROTEINS:
+					// using 1g = 4 kCal
+					gram = kCals / 4;
+					break;
+				case SATURATED_FATS:
+					// using 1g = 9 kCal
+					gram = kCals / 9;
+					break;
+				case MONOUNSATURATED_FATS:
+					// using 1g = 9 kCal
+					gram = kCals / 9;
+					break;
+				case POLYUNSATURATED_FATS:
+					// using 1g = 9 kCal
+					gram = kCals / 9;
+					break;
+				case ALCOHAL:
+					// using 1g = 7 kCal
+					gram = kCals / 7;
+					break;
+				default:
+					break;
+				}
+
+		}
+		return gram;
+	}
+
+	// ===================== APIs Methods ====================//
+	public double getBmi() {
+		return bmi;
+	}
+
+	public double getBmr() {
+		return bmr;
+	}
+
+	public double getTee() {
+		return tee;
+	}
+
+	public double getDailyCaloriesDifference() {
+		return dailyCaloriesDifference;
+	}
+
+	public double getBmrAtIdealWeight() {
+		return bmrAtIdealWeight;
+	}
+
+	public double getIntakeCaloriesAtIdealWeight() {
+		return intakeCaloriesAtIdealWeight;
+	}
+
+	public double getRawExerciseCalories() {
+		return rawExerciseCalories;
+	}
+
+	public double getRecommendedCalories() {
+		return recommendedCalories;
+	}
+
+	public double getRecommendedExercise() {
+		return recommendedExercise;
+	}
+
+	public double getRecommendedFoodCalories() {
+		return recommendedCalories;
+	}
+
+	public double dailyCaloriesDifference() {
+		return dailyCaloriesDifference;
+	}
+
+	public List<Nutrition> getRecommendedNutrients() {
+		return recommendedNutrients;
+	}
+
+	public double getIdealWeight() {
+		return idealWeight;
+	}
+
+	public double getDailyGoalintake() {
+		return dailyGoalintake;
+	}
+
+	public void setDailyGoalintake(double dailyGoalintake) {
+		this.dailyGoalintake = dailyGoalintake;
+	}
+
+	public double getDailyGoalBurnt() {
+		return dailyGoalBurnt;
+	}
+
+	public void setDailyGoalBurnt(double dailyGoalBurnt) {
+		this.dailyGoalBurnt = dailyGoalBurnt;
+	}
+
+	public double getHicoScore() {
+		return hicoScore;
+	}
+
+	public void setHicoScore(double hicoScore) {
+		this.hicoScore = hicoScore;
+	}
+
+	@Override
+	public String toString() {
+		return "GoalRecommendation [bmi=" + bmi + ", bmr=" + bmr + ", tee=" + tee + ", idealWeight=" + idealWeight
+				+ ", bmrAtIdealWeight=" + bmrAtIdealWeight + ", intakeCaloriesAtIdealWeight="
+				+ intakeCaloriesAtIdealWeight + ", dailyCaloriesDifference=" + dailyCaloriesDifference
+				+ ", rawExerciseCalories=" + rawExerciseCalories + ", recommendedExercise=" + recommendedExercise
+				+ ", recommendedCalories=" + recommendedCalories + ", recommendedNutrients=" + recommendedNutrients
+				+ ", userProfile=" + userProfile + "]";
+	}
+
+}

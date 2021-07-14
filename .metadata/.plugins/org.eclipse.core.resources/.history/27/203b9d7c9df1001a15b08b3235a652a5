@@ -1,0 +1,1095 @@
+package com.playpal.onboarding.rest;
+
+import com.playpal.Constants.RewardPoints.RewardEvent.Fixed;
+import com.playpal.dto.LastThreeWeightsDTO;
+import com.playpal.exceptions.PlaypalRESTException;
+import com.playpal.exceptions.UnauthorizedPlaypalRESTException;
+import com.playpal.model.Allergy;
+import com.playpal.model.Medication;
+import com.playpal.onboarding.Constants;
+import com.playpal.onboarding.util.Utils;
+import com.playpal.onboarding.dto.ExtendedUserDiseaseDTO;
+import com.playpal.onboarding.dto.FitbitAuthDataDTO;
+import com.playpal.onboarding.dto.ResetOwnPasswordDTO;
+import com.playpal.onboarding.dto.ResetPasswordDTO;
+import com.playpal.onboarding.dto.UserDemoGraphicsDTO;
+import com.playpal.enums.ActivityLevel;
+import com.playpal.onboarding.dto.UserDTO;
+import com.playpal.onboarding.dto.WeightUpdateDTO;
+import com.playpal.onboarding.exception.AuthenticationException;
+import com.playpal.onboarding.model.FitbitAuthData;
+import com.playpal.onboarding.model.User;
+import com.playpal.onboarding.model.UserAllergies;
+import com.playpal.onboarding.model.UserDevice;
+import com.playpal.onboarding.model.UserDisease;
+import com.playpal.onboarding.model.UserFamilyDisease;
+import com.playpal.onboarding.model.UserMedications;
+import com.playpal.onboarding.model.UserProfile;
+import com.playpal.onboarding.repository.FitbitAuthDataRepository;
+import com.playpal.onboarding.repository.UserAllergiesRepository;
+import com.playpal.onboarding.repository.UserMedicationsRepository;
+import com.playpal.onboarding.service.ExternalDeviceService;
+import com.playpal.onboarding.service.UserDiseaseService;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
+import io.swagger.annotations.ApiParam;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Component;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import com.playpal.onboarding.util.SMSSender;
+import com.playpal.util.CommonUtils;
+import com.playpal.util.HelloToService;
+import com.playpal.util.ResponseMessage;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Set;
+import javax.validation.Valid;
+import org.springframework.beans.BeanUtils;
+import org.springframework.context.annotation.Bean;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.mail.javamail.JavaMailSenderImpl;
+import org.springframework.web.bind.annotation.RequestBody;
+
+/**
+ * The Onboarding RESTful API controller.
+ *
+ * @author Naaman Musawwir
+ */
+@Component
+@Api(value = "Playpal Onboarding API")
+@RestController
+@SuppressWarnings("UseSpecificCatch")
+public class OnboardingRESTController extends BaseRESTController {
+
+	Logger logger = LoggerFactory.getLogger(OnboardingRESTController.class);
+
+	@Autowired
+	private ExternalDeviceService externalDeviceSvc;
+
+	@Autowired
+	private UserAllergiesRepository userAllergiesRepo;
+
+	@Autowired
+	private UserMedicationsRepository userMedicationsRepo;
+
+	@Autowired
+	private FitbitAuthDataRepository fitbitAuthDataRepo;
+
+	@Autowired
+	private UserDiseaseService userDiseaseService;
+
+	@Bean
+	public JavaMailSender getJavaMailSender() {
+		JavaMailSenderImpl mailSender = new JavaMailSenderImpl();
+		mailSender.setHost(env.getProperty("smtp.host"));
+		mailSender.setPort(Integer.parseInt(env.getProperty("smtp.port")));
+		mailSender.setUsername(env.getProperty("smtp.user"));
+		mailSender.setPassword(env.getProperty("smtp.password"));
+
+		Properties props = mailSender.getJavaMailProperties();
+		props.put("mail.transport.protocol", "smtp");
+		props.put("mail.smtp.auth", "true");
+		props.put("mail.smtp.starttls.enable", "true");
+		props.put("mail.debug", "true");
+
+		return mailSender;
+	}
+
+	@ApiOperation(value = "Health check", notes = "Health check response to show service is healthy.", tags = {
+			"Service Health Check" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.HEALTH_CHECK, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	public ResponseEntity<?> healthCheck() throws PlaypalRESTException {
+		return new ResponseEntity<>(new HelloToService("onboarding service"), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "List users in the system", notes = "Lists all the users in the system or search against the passed name query string.", tags = {
+			"Users" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Users.LIST_USERS, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	ResponseEntity<List<User>> loadUsers(
+			@ApiParam(value = "User name hint", required = false) @RequestParam(value = "name_hint", required = false) String nameHint)
+			throws PlaypalRESTException {
+
+		List<User> users = null;
+
+		try {
+			if (nameHint == null || nameHint.isEmpty()) {
+				users = userRepo.findAll();
+			} else {
+				users = userRepo.findByFirstNameIgnoreCaseContainingOrLastNameIgnoreCaseContaining(nameHint, nameHint);
+			}
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(users, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Get user ids of all users in the system", notes = "Return all the user ids in the system.", tags = {
+			"Users" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Users.GET_USER_IDS, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	ResponseEntity<List<Long>> getUserIds() throws PlaypalRESTException {
+
+		List<Long> userIds = null;
+
+		try {
+			userIds = userRepo.findUserIds();
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(userIds, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Get a user by Id", notes = "Returns a user object against passed id.", tags = { "Users" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Users.GET_USER, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	ResponseEntity<User> getUser(
+			@ApiParam(value = "User Id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		User user = null;
+
+		try {
+			Optional<User> userOp = userRepo.findById(userId);
+			if (userOp.isPresent()) {
+				user = userOp.get();
+			} else {
+				throw new PlaypalRESTException("User does not exist with id " + userId);
+			}
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(user, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Get logged in user's demographics by Id", notes = "Returns a UserDemographics object against the loggedin user.", tags = {
+			"Users" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Users.GET_USER_DG, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	ResponseEntity<UserDemoGraphicsDTO> getUserDG() throws UnauthorizedPlaypalRESTException, PlaypalRESTException {
+
+		UserDemoGraphicsDTO userDg = null;
+
+		try {
+			Long userId = (Long) httpSession.getAttribute("user");
+			if (userId == null) {
+				throw new UnauthorizedPlaypalRESTException("Invalid request. Please login first!");
+			}
+
+			Optional<User> userOp = userRepo.findById(userId);
+			if (userOp.isPresent()) {
+				User user = userOp.get();
+				UserProfile up = userProfileRepo.findFirst1ByUserIdOrderByIdDesc(userId);
+				userDg = new UserDemoGraphicsDTO();
+
+				BeanUtils.copyProperties(user, userDg);
+				BeanUtils.copyProperties(up, userDg);
+
+			} else {
+				throw new PlaypalRESTException("User does not exist with id " + userId);
+			}
+		} catch (UnauthorizedPlaypalRESTException | PlaypalRESTException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(userDg, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update user demographics", notes = "Verify input data and update user data into database.", tags = {
+			"Users" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Users.UPDATE_USER_DG, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> updateUserDG(@Valid @RequestBody UserDemoGraphicsDTO userDg)
+			throws UnauthorizedPlaypalRESTException, PlaypalRESTException {
+
+		try {
+			Long userId = (Long) httpSession.getAttribute("user");
+			logger.info("UserId: " + userId);
+
+			if (userId == null) {
+				throw new UnauthorizedPlaypalRESTException("Invalid request. Please login first!");
+			}
+
+			if (!userId.equals(userDg.getUserId())) {
+				throw new PlaypalRESTException("userId", "Suspicious action! This will be reported.");
+			}
+
+			Optional<User> auser = userRepo.findById(userId);
+			if (!userDg.getEmail().equals(auser.get().getEmail())) {
+				if (userRepo.findByEmail(userDg.getEmail()) != null) {
+					throw new PlaypalRESTException("Email",
+							"Sorry, a user already exists with email: " + userDg.getEmail());
+				}
+			}
+
+			User updatabale = auser.get();
+			BeanUtils.copyProperties(userDg, updatabale);
+			userRepo.save(updatabale);
+
+			UserProfile up = userProfileRepo.findFirst1ByUserIdOrderByIdDesc(userDg.getUserId());
+			UserProfile uup = new UserProfile();
+			BeanUtils.copyProperties(up, uup);
+			BeanUtils.copyProperties(userDg, uup);
+			uup.setId(0l);
+			userProfileRepo.save(uup);
+		} catch (UnauthorizedPlaypalRESTException | PlaypalRESTException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(new ResponseMessage("Informatioh has been updated successfully"), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update user weight", notes = "Accept integer input and update wieght into database.", tags = {
+			"User Profile" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Profile.UPDATE_USER_WEIGHT, produces = {
+			"application/json" }, method = RequestMethod.PUT)
+	public ResponseEntity<?> updateUserWeight(@Valid @RequestBody WeightUpdateDTO weightUpdate)
+			throws PlaypalRESTException {
+
+		try {
+			UserProfile up = userProfileRepo.findFirst1ByUserIdOrderByIdDesc(weightUpdate.getUserId());
+			if (up == null) {
+				throw new PlaypalRESTException("User with id '" + weightUpdate.getUserId() + "' does not exist!");
+			}
+
+			if (!(weightUpdate.getWeight().equals(up.getWeight())
+					&& weightUpdate.getWeightUnits().equals(up.getWeightUnits()))) {
+				UserProfile uup = new UserProfile();
+				BeanUtils.copyProperties(up, uup);
+				BeanUtils.copyProperties(weightUpdate, uup);
+				uup.setId(0l);
+				userProfileRepo.save(uup);
+			}
+		} catch (PlaypalRESTException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(new ResponseMessage("Weight has been updated successfully"), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Provide current and last weight records", notes = "Accept user id and provide last two weights updated by user.", tags = {
+			"User Profile" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Profile.GET_LAST_THREE_USER_WEIGHTS, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	public ResponseEntity<LastThreeWeightsDTO> getLastThreeUserWeightUpdates(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		LastThreeWeightsDTO ltws = null;
+		try {
+			List<UserProfile> ups = userProfileRepo.findFirst3ByUserIdOrderByIdDesc(userId);
+			if (ups == null || ups.isEmpty()) {
+				throw new PlaypalRESTException("User profile with id '" + userId + "' does not exist!");
+			}
+
+			double cw = ups.get(0).getWeight();
+			if (ups.get(0).getWeightUnits().toUpperCase().contains("KG")) {
+				cw = CommonUtils.convertKGsToLBs(cw);
+			}
+			switch (ups.size()) {
+			case 1:
+				ltws = new LastThreeWeightsDTO(cw, cw, cw);
+				break;
+			case 2: {
+				double pw = ups.get(1).getWeight();
+				if (ups.get(1).getWeightUnits().toUpperCase().contains("KG")) {
+					pw = CommonUtils.convertKGsToLBs(pw);
+				}
+				ltws = new LastThreeWeightsDTO(cw, pw, pw);
+				break;
+			}
+			case 3: {
+				double pw = ups.get(1).getWeight();
+				if (ups.get(1).getWeightUnits().toUpperCase().contains("KG")) {
+					pw = CommonUtils.convertKGsToLBs(pw);
+				}
+				double ppw = ups.get(2).getWeight();
+				if (ups.get(2).getWeightUnits().toUpperCase().contains("KG")) {
+					ppw = CommonUtils.convertKGsToLBs(ppw);
+				}
+				ltws = new LastThreeWeightsDTO(cw, pw, ppw);
+				break;
+			}
+			default:
+				break;
+			}
+		} catch (PlaypalRESTException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(ltws, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Put user's ftbit auth data", notes = "Persist Fitbit Auth data for later use.", tags = {
+			"External Devices" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Device.PUT_FITBIT_AUTH_DATA, produces = {
+			"application/json" }, method = RequestMethod.PUT)
+	ResponseEntity<FitbitAuthData> putFitbitAuthData(@Valid @RequestBody FitbitAuthDataDTO authData)
+			throws PlaypalRESTException {
+
+		FitbitAuthData fbad = null;
+
+		try {
+			Long userId = authData.getUserId();
+
+			fbad = fitbitAuthDataRepo.findByUserId(userId);
+			if (fbad == null) {
+				fbad = new FitbitAuthData(userId, CommonUtils.toJSON(authData.getFitbitData()));
+			} else {
+				fbad.setData(CommonUtils.toJSON(authData.getFitbitData()));
+			}
+
+			fitbitAuthDataRepo.save(fbad);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(fbad, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Get user's fitbit auth data", notes = "Accept user id and return auth data.", tags = {
+			"External Devices" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Device.GET_FITBIT_AUTH_DATA, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	public ResponseEntity<String> getFitbitAuthData(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		String fbd = null;
+
+		try {
+			fbd = fitbitAuthDataRepo.findByUserId(userId).getData();
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(fbd, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update a user", notes = "Verify input data and update user data into database.", tags = {
+			"Users" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Users.UPDATE_USER, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> updateUser(@Valid @RequestBody UserDTO user) throws PlaypalRESTException {
+
+		Optional<User> auser = userRepo.findById(user.getId());
+		if (!auser.isPresent()) {
+			throw new PlaypalRESTException("User Id", "User with id '" + user.getId() + "' does not exist!");
+		}
+
+		if (!user.getEmail().equals(auser.get().getEmail())) {
+			if (userRepo.findByEmail(user.getEmail()) != null) {
+				throw new PlaypalRESTException("Email", "Sorry, a user already exists with email: " + user.getEmail());
+			}
+		}
+
+		User updatabale = auser.get();
+
+		try {
+			BeanUtils.copyProperties(user, updatabale);
+			userRepo.save(updatabale);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(updatabale, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Authenticate a user", notes = "Verify credentials and authenticate a user.", tags = {
+			"Authentication" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Authentication.LOGIN, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loginUser(
+			@ApiParam(value = "User email", required = true) @RequestParam(value = "email", required = true) String email,
+			@ApiParam(value = "User password", required = true) @RequestParam(value = "password", required = true) String password)
+			throws PlaypalRESTException {
+
+		throw new UnsupportedOperationException("Login must be performed from POST equivalent");
+	}
+
+	@ApiOperation(value = "Present login error", notes = "Pesent proper authentication failure message.", tags = {
+			"Authentication" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Authentication.LOGIN_ERROR, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loginError(
+			@ApiParam(value = "Message", required = true) @RequestParam(value = "message", required = true) String message)
+			throws AuthenticationException {
+
+		throw new AuthenticationException(message);
+	}
+
+	@ApiOperation(value = "Create a user", notes = "Verify input data and create save user data into database.", tags = {
+			"Onboarding" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Onboarding_.CREATE_USER, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> createUser(@Valid @RequestBody User user) throws PlaypalRESTException {
+
+		if (userRepo.findByEmail(user.getEmail()) != null) {
+			throw new PlaypalRESTException("email", "User with email '" + user.getEmail() + "' already exists!");
+		}
+
+		User newUser = null;
+
+		try {
+			newUser = userRepo.save(user);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(newUser, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Show user's leaderboard ranking", notes = "Returns international ranking of a user.", tags = {
+			"Leaderboard" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Leaderboard.GET_RANKING, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	ResponseEntity<Object> getUserRanking(
+			@ApiParam(value = "User Id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		String rval = String.valueOf(System.currentTimeMillis());
+		Integer rand = Integer.parseInt(rval.substring(rval.length() - 3));
+
+		return new ResponseEntity<>(CommonUtils.getResponseObject("ranking", rand), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "List the connectable user device types", notes = "User device types are listed.", tags = {
+			"External Devices" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Device.LIST_DEVICE_TYPES, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	public ResponseEntity<?> listDeviceTypes() throws PlaypalRESTException {
+
+		com.playpal.Constants.DeviceType[] deviceTypes = null;
+		try {
+			deviceTypes = com.playpal.Constants.DeviceType.values();
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(deviceTypes, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Connect a device", notes = "Connect an approved device. Track with phone or App will be covered in the same call."
+			+ " The connection will help in answering queries against that device's user data and generating related reports.", tags = {
+					"External Devices" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Device.CONNECT_DEVICE, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> connectDevice(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId,
+			@ApiParam(value = "Device Type", required = true) @RequestParam(value = "device_type", required = true) String deviceType,
+			@ApiParam(value = "Device User Id", required = true) @RequestParam(value = "device_user_id", required = true) String deviceUserId)
+			throws PlaypalRESTException {
+
+		UserDevice userDevice = null;
+		try {
+			userDevice = externalDeviceSvc.connectDevice(userId, deviceType, deviceUserId);
+			awardFixedPoints(userId, Fixed.ConnectDevice.name());
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(userDevice, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "List user's connected devices by type", notes = "Accept user's id and device type to return attached devices.", tags = {
+			"External Devices" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Device.LIST_USER_DEVICES, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loadUserDevices(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId,
+			@ApiParam(value = "Device Type", required = true) @RequestParam(value = "device_type", required = true) String deviceType)
+			throws PlaypalRESTException {
+
+		List<UserDevice> uds = new ArrayList<>();
+		try {
+			uds = externalDeviceSvc.loadUserDevices(userId, deviceType);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(uds, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Security call to verify if a device is registered with user", notes = "Accept user's id, device id and device type to authorize.", tags = {
+			"Security" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Security.AUTHORIZE_DEVICE, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> isDeviceConnected(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId,
+			@ApiParam(value = "Device Type", required = true) @RequestParam(value = "device_type", required = true) String deviceType,
+			@ApiParam(value = "Device User Id", required = true) @RequestParam(value = "device_user_id", required = true) String deviceUserId)
+			throws PlaypalRESTException {
+
+		boolean deviceConnected = false;
+		try {
+			deviceConnected = externalDeviceSvc.isDeviceConnected(userId, deviceType, deviceUserId);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(CommonUtils.getResponseObject("deviceConnected", deviceConnected), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "List actvity levels", notes = "User activity levels.", tags = { "User Profile" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Profile.LIST_ACTIVITY_LEVELS, produces = {
+			"application/json" }, method = RequestMethod.GET)
+	public ResponseEntity<?> listActivityLevels() {
+		return new ResponseEntity<>(ActivityLevel.getLevelsMap(), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Load a user's profile", notes = "Return user's profile agianst the passed user id.", tags = {
+			"User Profile" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Profile.LOAD_USER_PROFILE, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loadUserProfile(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		UserProfile userProfile = null;
+		try {
+			userProfile = userProfileRepo.findFirst1ByUserIdOrderByIdDesc(userId);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(userProfile, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update user profile", notes = "Update the extended user profile that includes details containing"
+			+ " gender, height, allergies, habits etc.", tags = { "User Profile" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Profile.ADD_UPDATE_USER_PROFILE, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> addUpdateUserProfile(@Valid @RequestBody UserProfile userProfile)
+			throws PlaypalRESTException, UnauthorizedPlaypalRESTException {
+		UserProfile newUserProfile = null;
+
+		System.out.println("addUpdateUserProfile : user id : " + userProfile.getUserId());
+		Optional<UserProfile> optional = userProfileRepo.findTopByUserIdOrderByIdDesc(userProfile.getUserId());
+		if (optional.isPresent()) {
+			System.out.println("addUpdateUserProfile : found old");
+			Long profileId = optional.get().getId();
+			UserProfile previous = optional.get();
+			BeanUtils.copyProperties(userProfile, previous);
+			previous.setId(profileId);
+			newUserProfile = userProfileRepo.save(previous);
+		} else {
+			System.out.println("addUpdateUserProfile : creating new");
+			newUserProfile = userProfileRepo.save(userProfile);
+		}
+
+		try {
+
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		awardProfileFixedPoints(userProfile);
+
+		return new ResponseEntity<>(newUserProfile, HttpStatus.OK);
+	}
+
+	private void awardProfileFixedPoints(UserProfile up) {
+		Long uid = up.getUserId();
+
+		String gndr = up.getGender();
+		if (gndr != null && !gndr.isEmpty()) {
+			awardFixedPoints(uid, Fixed.Gender.name());
+		}
+
+		float ht = up.getHeight();
+		if (ht != 0) {
+			awardFixedPoints(uid, Fixed.Height.name());
+		}
+
+		float wt = up.getHeight();
+		if (wt != 0) {
+			awardFixedPoints(uid, Fixed.Weight.name());
+		}
+
+		Date bd = up.getBirthDate();
+		if (bd != null) {
+			awardFixedPoints(uid, Fixed.DOB.name());
+		}
+
+		String rc = up.getRace();
+		if (rc != null && !rc.isEmpty()) {
+			awardFixedPoints(uid, Fixed.Race.name());
+		}
+
+		String et = up.getEthnicity();
+		if (et != null && !et.isEmpty()) {
+			awardFixedPoints(uid, Fixed.Ethnicity.name());
+		}
+
+		String bt = up.getBodyType();
+		if (bt != null && !bt.isEmpty()) {
+			awardFixedPoints(uid, Fixed.BodyType.name());
+		}
+
+		String als = up.getActivityLevel();
+		if (als != null && !als.isEmpty()) {
+			awardFixedPoints(uid, Fixed.ActivityLevel.name());
+		}
+
+		Set<String> ts = up.getTemptations();
+		if (ts != null && !ts.isEmpty()) {
+			awardFixedPoints(uid, Fixed.Temptations.name());
+		}
+
+		Set<String> hs = up.getHabits();
+		if (hs != null && !hs.isEmpty()) {
+			awardFixedPoints(uid, Fixed.Habits.name());
+		}
+	}
+
+	class EAllergy extends UserAllergies {
+
+		private final String name;
+
+		public EAllergy(String name, UserAllergies ua) {
+			super(ua.getId(), ua.getUserId(), ua.getAllergyId());
+			this.name = name;
+		}
+
+		public String getName() {
+			return name;
+		}
+	}
+
+	@SuppressWarnings("null")
+	private List<EAllergy> loadUserAllergies(List<UserAllergies> uas) throws Exception {
+		List<EAllergy> eallergies = new ArrayList<>();
+
+		List<Long> allergyIds = new ArrayList<>();
+		for (UserAllergies ua : uas) {
+			allergyIds.add(ua.getAllergyId());
+		}
+
+		Map<String, String> map = new HashMap<>();
+		map.put("allergy_ids", CommonUtils.convertToRESTArray(allergyIds));
+		Allergy[] allergies = (Allergy[]) CommonUtils
+				.postFromRESTService(EDI_SVC_URL + "/allergies/get_allergies_by_ids", map, Allergy[].class);
+		for (Allergy a : allergies) {
+			String name = a.getName();
+			Long aid = a.getId();
+			for (UserAllergies ua : uas) {
+				if (Objects.equals(ua.getAllergyId(), aid)) {
+					eallergies.add(new EAllergy(name, ua));
+				}
+			}
+		}
+
+		return eallergies;
+	}
+
+	@ApiOperation(value = "Load user's allergies", notes = "Return user's allergies agianst the passed user id.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/load_user_allergies", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loadUserAllergies(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		List<EAllergy> eallergies = new ArrayList<>();
+
+		try {
+			List<UserAllergies> uas = userAllergiesRepo.findByUserId(userId);
+			eallergies = loadUserAllergies(uas);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(eallergies, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update a user's allergies", notes = "Accept user's id and list of allergy Ids and persist.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/update_user_allergies", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> updateUserAllergies(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId,
+			@ApiParam(value = "Allergy Ids", required = true) @RequestParam(value = "allergy_ids", required = true) Set<Long> allergies)
+			throws PlaypalRESTException {
+
+		List<EAllergy> eallergies = new ArrayList<>();
+		try {
+			List<UserAllergies> uas = new ArrayList<>();
+			userAllergiesRepo.deleteByUserId(userId);
+			for (Long allergy : allergies) {
+				uas.add(new UserAllergies(userId, allergy));
+			}
+
+			userAllergiesRepo.saveAll(uas);
+
+			eallergies = loadUserAllergies(uas);
+
+			awardFixedPoints(userId, Fixed.Allergies.name());
+
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(eallergies, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Load user's diseases", notes = "Return user's diseases agianst the passed user id.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/load_user_diseases", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loadUserDiseases(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		List<ExtendedUserDiseaseDTO> ediseases = new ArrayList<>();
+
+		try {
+			ediseases = userDiseaseService.loadExtendedUserDiseases(userId);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(ediseases, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update a user's diseases", notes = "Accept user's id and list of disease Ids and persist.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/update_user_diseases", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> updateUserDiseases(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId,
+			@ApiParam(value = "Disease Ids", required = true) @RequestParam(value = "disease_ids", required = true) Set<Long> diseases)
+			throws PlaypalRESTException {
+
+		List<ExtendedUserDiseaseDTO> ediseases = new ArrayList<>();
+
+		try {
+			List<UserDisease> uds = new ArrayList<>();
+			userDiseaseService.deleteByUserId(userId);
+			for (Long disease : diseases) {
+				uds.add(new UserDisease(userId, disease));
+			}
+
+			userDiseaseService.saveAll(uds);
+
+			ediseases = userDiseaseService.loadExtendedUserDiseases(userId);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		awardFixedPoints(userId, Fixed.Diseases.name());
+
+		return new ResponseEntity<>(ediseases, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Load user's family diseases", notes = "Return user's family diseases agianst the passed user id.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/load_user_family_diseases", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loadUserFamilyDiseases(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		List<ExtendedUserDiseaseDTO> efdiseases = new ArrayList<>();
+
+		try {
+			efdiseases = userDiseaseService.loadExtendedUserFamilyDiseases(userId);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(efdiseases, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update a user's family diseases", notes = "Accept user's id and list of family disease Ids and persist.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/update_user_family_diseases", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> updateUserFamilyDiseases(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId,
+			@ApiParam(value = "Family Disease Ids", required = true) @RequestParam(value = "disease_ids", required = true) Set<Long> diseases)
+			throws PlaypalRESTException {
+
+		List<ExtendedUserDiseaseDTO> efdiseases = new ArrayList<>();
+		try {
+			List<UserFamilyDisease> ufds = new ArrayList<>();
+			userDiseaseService.deleteByUserIdFamily(userId);
+			for (Long disease : diseases) {
+				ufds.add(new UserFamilyDisease(userId, disease));
+			}
+
+			userDiseaseService.saveAllFamily(ufds);
+
+			efdiseases = userDiseaseService.loadExtendedUserFamilyDiseases(userId);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		awardFixedPoints(userId, Fixed.FamilyHistory.name());
+
+		return new ResponseEntity<>(efdiseases, HttpStatus.OK);
+	}
+
+	class EMedication extends UserMedications {
+
+		private final String name;
+
+		public EMedication(String name, UserMedications ua) {
+			super(ua.getId(), ua.getUserId(), ua.getMedicationId());
+			this.name = name;
+		}
+
+		public String getName() {
+			return name;
+		}
+	}
+
+	@SuppressWarnings("null")
+	private List<EMedication> loadUserMedications(List<UserMedications> ums) {
+		List<EMedication> emedications = new ArrayList<>();
+
+		List<Long> medicationIds = new ArrayList<>();
+		for (UserMedications ud : ums) {
+			medicationIds.add(ud.getMedicationId());
+		}
+
+		Map<String, String> map = new HashMap<>();
+		map.put("medication_ids", CommonUtils.convertToRESTArray(medicationIds));
+		Medication[] medications = (Medication[]) CommonUtils
+				.postFromRESTService(EDI_SVC_URL + "/medications/get_medications_by_ids", map, Medication[].class);
+
+		for (Medication a : medications) {
+			String name = a.getName();
+			Long mid = a.getId();
+			for (UserMedications um : ums) {
+				if (Objects.equals(um.getMedicationId(), mid)) {
+					emedications.add(new EMedication(name, um));
+				}
+			}
+		}
+
+		return emedications;
+	}
+
+	@ApiOperation(value = "Load user's medications", notes = "Return user's medications agianst the passed user id.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/load_user_medications", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> loadUserMedications(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId)
+			throws PlaypalRESTException {
+
+		List<EMedication> emedications = new ArrayList<>();
+
+		try {
+			List<UserMedications> ums = userMedicationsRepo.findByUserId(userId);
+
+			emedications = loadUserMedications(ums);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(emedications, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Update a user's medications", notes = "Accept user's id and list of medication Ids and persist.", tags = {
+			"User Profile" })
+	@RequestMapping(value = "/rest/profile/update_user_medications", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> updateUserMedications(
+			@ApiParam(value = "User id", required = true) @RequestParam(value = "user_id", required = true) Long userId,
+			@ApiParam(value = "Medication Ids", required = true) @RequestParam(value = "medication_ids", required = true) Set<Long> medications)
+			throws PlaypalRESTException {
+
+		List<EMedication> emedications = new ArrayList<>();
+
+		try {
+			List<UserMedications> ums = new ArrayList<>();
+			userMedicationsRepo.deleteByUserId(userId);
+			for (Long medication : medications) {
+				ums.add(new UserMedications(userId, medication));
+			}
+
+			userMedicationsRepo.saveAll(ums);
+
+			emedications = loadUserMedications(ums);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		awardFixedPoints(userId, Fixed.Medications.name());
+
+		return new ResponseEntity<>(emedications, HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Forgot password mobile", notes = "Accepts user's email address. 4 digit code will be sent to"
+			+ " the mobile number for password reset verification. User enters it on the reset screen to set new password.", tags = {
+					"Onboarding" })
+	@RequestMapping(value = "/rest/onboarding/forgot_password_mobile", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> forgotPasswordMobile(
+			@ApiParam(value = "User email", required = true) @RequestParam(value = "email", required = true) String email)
+			throws PlaypalRESTException {
+
+		User user = null;
+		try {
+			user = userRepo.findByEmail(email);
+			if (user == null) {
+				throw new PlaypalRESTException("User does not exists with email: " + email);
+			}
+
+			String random = System.nanoTime() + "";
+			random = random.substring(random.length() - 4);
+
+			String message = "Hello " + user.getFirstName() + " " + user.getLastName() + "!\n\n" + random
+					+ " is your pass code to reset password.\n\n" + "Thank you for using Playpal.\n" + "Playpal Team.";
+
+			SMSSender.sendSMS(env.getProperty("sns.client.key"), env.getProperty("sns.client.secret"), message,
+					user.getMobileNo());
+			applicationSession.put(email, random);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(new ResponseMessage("SMS has been sent to " + user.getMobileNo()), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Forgot password Web", notes = "Accepts user's email address. An email will be sent to the user"
+			+ " with password reset link. Link will be valid for 30 minutes or so.", tags = { "Onboarding" })
+	@RequestMapping(value = "/rest/onboarding/forgot_password_web", produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> forgotPasswordWeb(
+			@ApiParam(value = "User email", required = true) @RequestParam(value = "email", required = true) String email)
+			throws PlaypalRESTException {
+
+		try {
+			User user = userRepo.findByEmail(email);
+			if (user == null) {
+				throw new PlaypalRESTException("User does not exists with email: " + email);
+			}
+
+			String random = System.nanoTime() + "";
+			JavaMailSender jms = getJavaMailSender();
+
+			SimpleMailMessage sms = new SimpleMailMessage();
+			sms.setFrom("Playpal <playpal@truemeridian.com>");
+			sms.setTo(email);
+			sms.setSubject("Playpal Forgot Password Response");
+			sms.setText("Hello " + user.getFirstName() + " " + user.getLastName() + "!\n\n"
+					+ "Please click on the following link to reset your password.\n"
+					+ env.getProperty("application.scheme") + "://" + env.getProperty("application.host") + ":"
+					+ env.getProperty("application.port") + env.getProperty("password.reset.url") + "?reset_code="
+					+ random + "\n\n" + "Thank you for using Playpal.\n" + "Playpal Team.");
+
+			jms.send(sms);
+
+			applicationSession.put(email, random);
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(new ResponseMessage("Email has been sent."), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Reset password mobile", notes = "Password will be reset against the user's eail address.", tags = {
+			"Onboarding" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Onboarding_.RESET_MOBILE_PASSWORD, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> resetPasswordMobile(@Valid @RequestBody ResetPasswordDTO rpm) throws PlaypalRESTException {
+
+		String code = (String) applicationSession.get(rpm.getEmail());
+		if (code == null || !code.equals(rpm.getPassCode())) {
+			throw new PlaypalRESTException("Invalid request. Please use the code sent in SMS!");
+		}
+
+		try {
+			User user = userRepo.findByEmail(rpm.getEmail());
+			userRepo.updatePassword(Utils.getPasswordHash(rpm.getNewPassword()), user.getId());
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(new ResponseMessage("Password was reset successfully"), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Reset password web", notes = "Password will be reset against the user's email address.", tags = {
+			"Onboarding" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Onboarding_.RESET_WEB_PASSWORD, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> resetPasswordWeb(@Valid @RequestBody ResetPasswordDTO rpw) throws PlaypalRESTException {
+
+		String code = (String) applicationSession.get(rpw.getEmail());
+		if (code == null || !code.equals(rpw.getPassCode())) {
+			throw new PlaypalRESTException("Invalid request. Please use the link sent in email !");
+		}
+
+		try {
+			User user = userRepo.findByEmail(rpw.getEmail());
+			userRepo.updatePassword(Utils.getPasswordHash(rpw.getNewPassword()), user.getId());
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(new ResponseMessage("Password was reset successfully"), HttpStatus.OK);
+	}
+
+	@ApiOperation(value = "Reset own password", notes = "Logged in user's password will be reset.", tags = {
+			"Onboarding" })
+	@RequestMapping(value = Constants.Onboarding.Rest.EndPoint.Onboarding_.RESET_OWN_PASSWORD, produces = {
+			"application/json" }, method = RequestMethod.POST)
+	public ResponseEntity<?> resetOwnPassword(@Valid @RequestBody ResetOwnPasswordDTO rop)
+			throws UnauthorizedPlaypalRESTException, PlaypalRESTException {
+
+		try {
+			Long userId = (Long) httpSession.getAttribute("user");
+			if (userId == null) {
+				throw new UnauthorizedPlaypalRESTException("Invalid request. Please login first!");
+			}
+
+			logger.debug("Loggd In User ID: " + userId);
+
+			Optional<User> userOp = userRepo.findById(userId);
+			if (userOp.isPresent()) {
+				User user = userOp.get();
+				if (Utils.matchPassword(rop.getOldPassword(), user.getPassword())) {
+					userRepo.updatePassword(Utils.getPasswordHash(rop.getNewPassword()), userId);
+				} else {
+					throw new PlaypalRESTException("Old password does not match!!");
+				}
+			} else {
+				throw new PlaypalRESTException("Invalid request. User does not exist!");
+			}
+		} catch (UnauthorizedPlaypalRESTException | PlaypalRESTException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new PlaypalRESTException(e.getMessage(), e);
+		}
+
+		return new ResponseEntity<>(new ResponseMessage("Password was reset successfully"), HttpStatus.OK);
+	}
+}

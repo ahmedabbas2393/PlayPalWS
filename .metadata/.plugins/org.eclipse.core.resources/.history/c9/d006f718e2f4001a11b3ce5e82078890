@@ -1,0 +1,281 @@
+package com.playpal.udc.healthtrack;
+
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+import org.hibernate.cfg.annotations.SetBinder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import com.playpal.Constants;
+import com.playpal.dto.HealthTrack;
+import com.playpal.dto.Nutrition;
+import com.playpal.udc.ServicesClient;
+import com.playpal.udc.UserSourceDayId;
+import com.playpal.udc.activity.ActivityManager;
+import com.playpal.udc.activity.model.ActivitiesSummary;
+import com.playpal.udc.devices.fitbit.DailyActivitySummary;
+import com.playpal.udc.exception.UDCException;
+import com.playpal.udc.foodintake.FoodIntakeManager;
+import com.playpal.udc.genearlvital.GeneralVitalManager;
+import com.playpal.udc.genearlvital.model.GeneralVital;
+import com.playpal.udc.healthtrack.model.Recommendation;
+import com.playpal.udc.healthtrack.model.RecommendationRepo;
+import com.playpal.udc.rewardpoints.RewardPointsService;
+import com.playpal.util.CommonUtils;
+import com.playpal.dto.UserProfile;
+import com.playpal.enums.ImportLookups.UserCase;
+import com.playpal.exceptions.EntityNotFoundException;
+
+@Service
+public class HealthTrackManager implements HealthTrackApi {
+    @Autowired
+    private HealthGoalComputation gRec;
+
+    @Autowired
+    private ServicesClient servicesClient;
+
+    @Autowired
+    private FoodIntakeManager foodIntakeManager;
+
+    @Autowired
+    private ActivityManager activityManager;
+
+    @Autowired
+    private GeneralVitalManager generalVitManager;
+
+    @Autowired
+    private RewardPointsService rewardPointsSvc;
+
+    @Autowired
+    private RecommendationRepo recommendationRepo;
+
+    private static final Logger LOG = LoggerFactory.getLogger(HealthTrackManager.class);
+    DecimalFormat df = new DecimalFormat("#.0");
+    DecimalFormat df1 = new DecimalFormat("#.");
+
+    @Override
+    public HealthTrack getHealthTrack(Long userId, Date date) throws UDCException {
+        long startTime = System.currentTimeMillis();
+        LOG.debug("calculation start..."); 
+        HealthTrack hTrack = new HealthTrack();
+        UserProfile userProfile = servicesClient.getUserProfile(userId);
+        LOG.debug("1 --> {}", userProfile);
+        UserSourceDayId id = new UserSourceDayId(userId, date);
+        hTrack.setDate(date);
+
+        // 1. goal calories
+        HealthGoalComputation grec = gRec.computeCaloriesGoalOnly(userProfile, date);
+        grec.setHicoScore(calculateHICO(userProfile,date));
+        LOG.debug("2 --> {}", grec);
+        rewardPointsSvc.setGoal(grec);
+        int goalCalories = (int) grec.dailyCaloriesDifference();
+        hTrack.setGoalCalories(goalCalories);
+
+        // 2. intake calories
+        hTrack.setNutritionCalories(foodIntakeManager.getIntakeCalories(userId, date));
+
+        try {
+            GeneralVital genVit = generalVitManager.getGeneralVital(id);
+            LOG.debug("General Vital {}", genVit);
+            if (genVit.getCalories() != null)
+                hTrack.setGeneralVitalsCalories(genVit.getCalories().getValue());
+            else
+                hTrack.setGeneralVitalsCalories(0);
+        } catch (EntityNotFoundException e) {
+            hTrack.setGeneralVitalsCalories(0);
+        }
+
+        int restingCalories = 0;
+        try {
+            ActivitiesSummary phyCals = activityManager.getActivities(id);
+            LOG.debug("Activities Summary {}", phyCals);
+            if (phyCals.getCalories() != null)
+                hTrack.setPhysicalActivityCalories(phyCals.getCalories().getValue());
+            else
+                hTrack.setPhysicalActivityCalories(0);
+            if (phyCals.getBmr() != null)
+                restingCalories = phyCals.getBmr().getValue();
+
+        } catch (EntityNotFoundException e) {
+            hTrack.setPhysicalActivityCalories(0);
+        }
+
+        // get resting calories
+        if (restingCalories == 0)
+            restingCalories = (int) gRec.getBmr();
+        hTrack.setRestCalories(restingCalories);
+        // goal progress
+        hTrack.setGoalProgress(getGoalProgress(hTrack.getPhysicalActivityCalories(), gRec.getRecommendedExercise(), hTrack.getNutritionCalories(), gRec.getRecommendedFoodCalories(), goalCalories));
+
+        // 2. reward points
+        try {
+            int actRewardPoints = rewardPointsSvc.getDailyUserRewardPoints(userId,
+                    Constants.RewardPoints.ActivityType.Physical.name(), date);
+            hTrack.setPhysicalActivityPoints(actRewardPoints);
+        } catch (Exception e) {
+            hTrack.setPhysicalActivityPoints(0);
+            LOG.error(e.getMessage());
+        }
+        try {
+            int nutPoints = rewardPointsSvc.getDailyUserRewardPoints(userId,
+                    Constants.RewardPoints.ActivityType.Nutrition.name(), date);
+            hTrack.setNutritionPoints(nutPoints);
+        } catch (Exception e) {
+            hTrack.setNutritionPoints(0);
+            LOG.error(e.getMessage());
+        }
+        try {
+            int genVitPoints = rewardPointsSvc.getDailyUserRewardPoints(userId,
+                    Constants.RewardPoints.ActivityType.Vitals.name(), date);
+            hTrack.setGeneralVitalsPoints(genVitPoints);
+        } catch (Exception e) {
+            hTrack.setGeneralVitalsPoints(0);
+            LOG.error(e.getMessage());
+        }
+
+        long endTime = System.currentTimeMillis();
+        LOG.debug("...time taken {}", endTime - startTime);
+       
+        hTrack.setBmi((grec.getBmi()));
+        hTrack.setBmr((grec.getBmr()));
+        hTrack.setHicoScore(grec.getHicoScore());
+       
+        hTrack.setRequiredCalories(grec.getTee());
+        hTrack.setIdealWeight(grec.getIdealWeight());
+//        hTrack.setBmrAtIdealWeight(Double.valueOf(df.format(grec.getBmrAtIdealWeight())));
+//        hTrack.setIntakeCaloriesAtIdealWeight(Double.valueOf(df.format(grec.getIntakeCaloriesAtIdealWeight())));
+//        hTrack.setDailyCaloriesDifference(Double.valueOf(df.format(grec.getDailyCaloriesDifference())));
+//        hTrack.setRawExerciseCalories(Double.valueOf(df.format(grec.getRawExerciseCalories())));
+//        hTrack.setRecommendedExercise(grec.getRecommendedExercise());
+//        hTrack.setRecommendedCalories(grec.getRecommendedCalories());
+        if(grec.getDailyGoalintake()< 3000) {
+        	hTrack.setDailyGoalintake( grec.getDailyGoalintake());
+        }
+        else
+        	hTrack.setDailyGoalintake(3000);
+        	
+        hTrack.setDailyGoalBurnt(grec.getDailyGoalBurnt());
+        return hTrack;
+    }
+
+    private double calculateHICO(UserProfile userProfile, Date date) {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+	/**
+     * @return
+     */
+    private Integer getGoalProgress(double exerciseCal, double recExcersieCal, double foodCal,
+            double recFoodCal, double goalCal) {
+        double progress = 0;
+        
+        double exerciseProgressPercentage = 0;
+
+        if (exerciseCal < recExcersieCal) {
+            exerciseProgressPercentage = exerciseCal / recExcersieCal * 100;
+        } else if (goalCal <= 0) {
+            exerciseProgressPercentage = 100;
+        } else {
+            exerciseProgressPercentage = 100 + (100 - (exerciseCal / recExcersieCal * 100));
+        }
+
+        double nutritionProgressPercentage = 0;
+
+        if (foodCal <= recFoodCal) {
+            nutritionProgressPercentage = foodCal / recFoodCal * 100;
+        } else if (goalCal <= 0) {
+            nutritionProgressPercentage = 100 + (100 - (foodCal / recFoodCal * 100));
+        } else {
+            nutritionProgressPercentage = 100;
+        }
+
+        progress = (exerciseProgressPercentage + nutritionProgressPercentage) / 2;
+        return (int) progress;
+    }
+
+    @Override
+    public List<Nutrition> getGoalNutrients(Long userId, Date date) throws UDCException {
+        UserProfile userProfile = servicesClient.getUserProfile(userId);
+        HealthGoalComputation goalNtrs = gRec.computeNutrientsAndCaloriesGoal(userProfile, date);
+        LOG.debug("Goal Recommendation {}", goalNtrs);
+        return goalNtrs.getRecommendedNutrients();
+    }
+
+    @Override
+    public List<HealthTrack> getHealthTrackHistory(Long userId, Date date) throws UDCException {
+        // user profile
+        UserProfile userProfile = servicesClient.getUserProfile(userId);
+        LOG.debug("User profile {}", userProfile);
+        // goal calories
+        int goalCalories = (int) gRec.computeCaloriesGoalOnly(userProfile).dailyCaloriesDifference();
+
+        List<Date> prevDays = CommonUtils.getPrevNthDays(date, 7);
+        List<HealthTrack> healthTrackHistory = new ArrayList<>();
+        for (Date prevDay : prevDays) {
+            HealthTrack hTrack = new HealthTrack();
+            hTrack.setDate(prevDay);
+            hTrack.setGoalCalories(goalCalories);
+
+            // intake calories
+            hTrack.setNutritionCalories(foodIntakeManager.getIntakeCalories(userId, prevDay));
+
+            int restingCalories = 0;
+            // physical calories
+            try {
+                ActivitiesSummary phyCals = activityManager.getActivities(new UserSourceDayId(userId, prevDay));
+                LOG.debug("Activities Summary {}", phyCals);
+                if (phyCals.getCalories() != null)
+                    hTrack.setPhysicalActivityCalories(phyCals.getCalories().getValue());
+                else
+                    hTrack.setPhysicalActivityCalories(0);
+                if (phyCals.getBmr() != null)
+                    restingCalories = phyCals.getBmr().getValue();
+            } catch (EntityNotFoundException e) {
+                hTrack.setPhysicalActivityCalories(0);
+            }
+//             get resting calories
+            if (restingCalories == 0)
+                restingCalories = (int) gRec.getBmr();
+            hTrack.setRestCalories(restingCalories);
+
+//             generalVital calories
+            try {
+                GeneralVital genVit = generalVitManager.getGeneralVital(new UserSourceDayId(userId, prevDay));
+                LOG.debug("General Vital {}", genVit);
+                if (genVit.getCalories() != null)
+                    hTrack.setGeneralVitalsCalories(genVit.getCalories().getValue());
+                else
+                    hTrack.setGeneralVitalsCalories(0);
+            } catch (EntityNotFoundException e) {
+                hTrack.setGeneralVitalsCalories(0);
+            }
+            
+            // goal progress
+            hTrack.setGoalProgress(getGoalProgress(hTrack.getPhysicalActivityCalories(), gRec.getRecommendedExercise(), hTrack.getNutritionCalories(), gRec.getRecommendedFoodCalories(), goalCalories));
+          //hicoScore
+            hTrack.setHicoScore(gRec.getHicoScore());
+            healthTrackHistory.add(hTrack);
+        }
+        return healthTrackHistory;
+    }
+
+    @Override
+    public List<Recommendation> getNutritionRecommendation(Long userId) throws UDCException {
+        List<Recommendation> recommendations = new ArrayList<>();
+        UserProfile userProfile = servicesClient.getUserProfile(userId);
+        UserCase bmiCat = CommonUtils.getBMICategory(userProfile.getHeight(), userProfile.getWeight());
+        if (bmiCat != null)
+            recommendations = recommendationRepo.findAllByGenderAndBmiCategoryAndCurrentDiseaseId(
+                    userProfile.getGender().getDisplayName().toLowerCase(), bmiCat.getBmi().toLowerCase(),
+                    userProfile.getCurrentDiseasesId());
+        LOG.debug("User profile {}, BMI Cat {}, Recommendations {}", userProfile, bmiCat.getBmi(), recommendations);
+        return recommendations;
+    }
+
+}
